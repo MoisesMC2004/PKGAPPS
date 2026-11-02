@@ -1604,7 +1604,7 @@ build_and_install_single() {
                     ;;
                 3)
                     echo -e "  ${C_YELLOW}==> Installation aborted by user.${C_RESET}"
-                    sleep 1.2
+                    sleep 0.7
                     popd >/dev/null
                     return 2
                     ;;
@@ -1780,7 +1780,7 @@ handle_url_input() {
                 ;;
             Q)
                 echo -e "  ${C_YELLOW}==> Installation aborted by user.${C_RESET}"
-                sleep 1.2
+                sleep 0.7
                 return 0
                 ;;
             *)
@@ -1929,7 +1929,7 @@ interactive_entrypoint() {
             local res=0
             handle_url_input "$input_url" || res=$?
             if [ "$res" -eq 2 ] || [ "$res" -eq 0 ]; then
-                sleep 1.2
+                sleep 0.7
             else
                 echo ""
                 read -rsn1 -p "  Press any key to return to menu..." < /dev/tty 2>/dev/null || true
