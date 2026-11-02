@@ -1,0 +1,2080 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ==============================================================================
+# PKGAPPS - Universal Precompiled (.tar.gz) Package Manager for Pacman (Omarchy TUI)
+# ==============================================================================
+
+CMD_NAME="pkgapps"
+
+GLOBAL_CONF="/etc/pkgapps.conf"
+if [ -f "$GLOBAL_CONF" ]; then
+    # shellcheck source=/dev/null
+    source "$GLOBAL_CONF"
+fi
+
+REPO_NAME="${REPO_NAME:-myapps}"
+REPO_DIR="${REPO_DIR:-/var/cache/${REPO_NAME}}"
+BIN_PATH="${BIN_PATH:-/usr/local/bin/pkgapps}"
+APP_BASE_DIR="${APP_BASE_DIR:-/opt}"
+
+REPO_DB="${REPO_DIR}/${REPO_NAME}.db.tar.gz"
+CONFIG_DIR="${HOME}/.config/${REPO_NAME}"
+SOURCES_FILE="${CONFIG_DIR}/sources.conf"
+SCRIPT_PATH="$(realpath "$0")"
+WORKDIR=""
+
+USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+
+# TrueColor & ANSI Palette (Omarchy Theme)
+C_RESET="\033[0m"
+C_BOLD="\033[1m"
+C_DIM="\033[38;2;108;112;134m"
+C_TEXT="\033[38;2;205;214;244m"
+C_SUBTEXT="\033[38;2;166;173;200m"
+C_BORDER="\033[38;2;116;199;236m"
+C_CYAN="\033[38;2;0;240;255m"
+C_PURPLE="\033[38;2;168;85;247m"
+C_GREEN="\033[38;2;166;227;161m"
+C_YELLOW="\033[38;2;249;226;175m"
+C_RED="\033[38;2;243;139;168m"
+C_BLUE="\033[38;2;137;180;250m"
+
+BTN_ACTIVE="\033[48;2;166;227;161m\033[38;2;17;17;27m\033[1m"
+BTN_WARN_ACTIVE="\033[48;2;243;139;168m\033[38;2;17;17;27m\033[1m"
+BTN_INACTIVE="\033[38;2;205;214;244m"
+
+# Gradient rows (Cyan -> Purple)
+G1="\033[38;2;0;242;254m"
+G2="\033[38;2;45;205;253m"
+G3="\033[38;2;90;165;251m"
+G4="\033[38;2;130;125;249m"
+G5="\033[38;2;168;85;247m"
+G6="\033[38;2;192;58;242m"
+
+mkdir -p "$CONFIG_DIR"
+touch "$SOURCES_FILE"
+
+cleanup_cursor() {
+    tput cnorm 2>/dev/null || true
+}
+trap cleanup_cursor EXIT INT TERM
+
+# ==============================================================================
+# Omarchy-Style TUI Primitives
+# ==============================================================================
+render_header() {
+    local subtitle="${1:-Universal precompiled archive (.tar.*) & AppImage manager for Pacman}"
+    clear 2>/dev/null || true
+    echo ""
+    echo -e "  ${G1}██████╗ ██╗  ██╗ ██████╗  █████╗ ██████╗ ██████╗ ███████╗${C_RESET}"
+    echo -e "  ${G2}██╔══██╗██║ ██╔╝██╔════╝ ██╔══██╗██╔══██╗██╔══██╗██╔════╝${C_RESET}"
+    echo -e "  ${G3}██████╔╝█████╔╝ ██║  ███╗███████║██████╔╝██████╔╝███████╗${C_RESET}"
+    echo -e "  ${G4}██╔═══╝ ██╔═██╗ ██║   ██║██╔══██║██╔═══╝ ██╔═══╝ ╚════██║${C_RESET}"
+    echo -e "  ${G5}██║     ██║  ██╗╚██████╔╝██║  ██║██║     ██║     ███████║${C_RESET}"
+    echo -e "  ${G6}╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝     ╚══════╝${C_RESET}"
+    echo -e "  ${C_CYAN}:: PRECOMPILED ARCHIVE (.TAR.*) & APPIMAGE SYSTEM MANAGER ::${C_RESET}"
+    echo ""
+    echo -e "  ${C_TEXT}${subtitle}${C_RESET}"
+    echo ""
+}
+
+render_table() {
+    local -a fields=()
+    local -a values=()
+    local max_f=18
+    local max_v=42
+
+    while [ $# -ge 2 ]; do
+        local f="$1"
+        local v="$2"
+        shift 2
+        f="${f//$'\r'/}"
+        v="${v//$'\r'/}"
+        f="${f//$'\n'/ }"
+        v="${v//$'\n'/ }"
+        fields+=("$f")
+        values+=("$v")
+        [ "${#f}" -gt "$max_f" ] && max_f="${#f}"
+        [ "${#v}" -gt "$max_v" ] && max_v="${#v}"
+    done
+
+    max_f=$((max_f + 2))
+    max_v=$((max_v + 2))
+
+    local h_f="" h_v=""
+    printf -v h_f "%*s" $((max_f + 1)) ""
+    printf -v h_v "%*s" $((max_v + 1)) ""
+    h_f="${h_f// /-}"
+    h_v="${h_v// /-}"
+
+    local sep="  ${C_BORDER}+${h_f}+${h_v}+${C_RESET}"
+
+    echo -e "$sep"
+    printf "  ${C_BORDER}|${C_RESET} ${C_SUBTEXT}%-*s${C_RESET}${C_BORDER}|${C_RESET} ${C_SUBTEXT}%-*s${C_RESET}${C_BORDER}|${C_RESET}\n" "$max_f" "Field" "$max_v" "Value"
+    echo -e "$sep"
+
+    local idx
+    local total_fields="${#fields[@]}"
+    for ((idx=0; idx!=total_fields; idx++)); do
+        printf "  ${C_BORDER}|${C_RESET} ${C_TEXT}%-*s${C_RESET}${C_BORDER}|${C_RESET} ${C_CYAN}%-*s${C_RESET}${C_BORDER}|${C_RESET}\n" "$max_f" "${fields[$idx]}" "$max_v" "${values[$idx]}"
+    done
+
+    echo -e "$sep"
+    echo ""
+}
+
+SELECTED_INDEX=0
+prompt_buttons() {
+    local question="$1"
+    local hint="$2"
+    shift 2
+    local -a btns=("$@")
+    local count="${#btns[@]}"
+    local cur=0
+    local key=""
+
+    tput civis 2>/dev/null || true
+    echo -e "  ${C_BORDER}${question}${C_RESET}"
+    echo ""
+    tput sc 2>/dev/null || true
+
+    while true; do
+        tput rc 2>/dev/null || printf "\r"
+        tput ed 2>/dev/null || true
+
+        local line="  "
+        local i
+        for ((i=0; i!=count; i++)); do
+            if [ "$i" -eq "$cur" ]; then
+                if [[ "${btns[$i]}" =~ (Cancel|Abort|Quit|Remove) ]]; then
+                    line+="${BTN_WARN_ACTIVE}   ${btns[$i]}   ${C_RESET}   "
+                else
+                    line+="${BTN_ACTIVE}   ${btns[$i]}   ${C_RESET}   "
+                fi
+            else
+                line+="${BTN_INACTIVE}   ${btns[$i]}   ${C_RESET}   "
+            fi
+        done
+        echo -e "$line"
+        echo ""
+        echo -e "  ${C_DIM}↔ toggle • enter submit • ${hint}${C_RESET}"
+
+        IFS= read -rsn1 key < /dev/tty || true
+
+        if [[ -z "$key" ]]; then
+            SELECTED_INDEX="$cur"
+            break
+        elif [[ "$key" == $'\x1b' ]]; then
+            local seq=""
+            read -rsn2 -t 0.05 seq < /dev/tty || true
+            case "$seq" in
+                "[C"|"[B") cur=$(( (cur + 1) % count )) ;;
+                "[D"|"[A") cur=$(( (cur - 1 + count) % count )) ;;
+            esac
+        else
+            case "${key,,}" in
+                l) cur=$(( (cur + 1) % count )) ;;
+                h) cur=$(( (cur - 1 + count) % count )) ;;
+                i|y) SELECTED_INDEX=0; break ;;
+                k)
+                    if [[ "${btns[0],,}" == k* ]]; then
+                        SELECTED_INDEX=0
+                        break
+                    fi
+                    ;;
+                w)
+                    if [ "$count" -ge 2 ] && [[ "${btns[1],,}" == w* ]]; then
+                        SELECTED_INDEX=1
+                        break
+                    fi
+                    ;;
+                n|1) [ "$count" -ge 2 ] && { SELECTED_INDEX=1; break; } ;;
+                c|2) [ "$count" -ge 3 ] && { SELECTED_INDEX=2; break; } ;;
+                q) SELECTED_INDEX=$((count - 1)); break ;;
+            esac
+        fi
+    done
+
+    tput cnorm 2>/dev/null || true
+    echo ""
+}
+
+# ==============================================================================
+# HELP MENU (-h / --help)
+# ==============================================================================
+show_help() {
+    render_header "Command Line Reference & Usage Guide"
+    render_table \
+        "Install Package" "$CMD_NAME [URL / Local File / Drag-and-Drop]" \
+        "Supported Formats" ".tar.gz, .tar.xz, .tar.zst, .tar.bz2, .AppImage" \
+        "Initialize Repo" "$CMD_NAME -i, --init" \
+        "List Tracked Apps" "$CMD_NAME -l, --list" \
+        "Update All Apps" "$CMD_NAME -u, --update (or sudo pacman -Syu)" \
+        "Remove Application" "$CMD_NAME -r, --remove [name]" \
+        "Pacman Repository" "${REPO_DIR} ([${REPO_NAME}])" \
+        "Tracked Sources" "${SOURCES_FILE}" \
+        "Apps Base Path" "${APP_BASE_DIR}/[app-name]"
+}
+
+# ==============================================================================
+# Pacman ILoveCandy Downloader (Optimized Single-line C/c---o o o)
+# ==============================================================================
+pacman_download() {
+    local url="$1"
+    local out="$2"
+    local label="$3"
+    local hdr="${out}.headers"
+
+    rm -f "$out" "$hdr"
+    curl -fsSL -A "$USER_AGENT" -D "$hdr" "$url" -o "$out" &
+    local pid=$!
+
+    local start_time="${EPOCHSECONDS:-$(date +%s)}"
+    local frame=0
+    local total=0
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 80)
+
+    tput civis 2>/dev/null || true
+
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$total" -le 0 ] && [ -f "$hdr" ]; then
+            total=$(grep -i '^content-length:' "$hdr" 2>/dev/null | tail -n1 | awk '{print $2}' | tr -d '\r\n' || echo 0)
+            [[ "$total" =~ ^[0-9]+$ ]] || total=0
+        fi
+
+        if [ $((frame % 10)) -eq 0 ]; then
+            cols=$(tput cols 2>/dev/null || echo 80)
+        fi
+
+        local curr=0
+        if [ -f "$out" ]; then
+            curr=$(stat -c%s "$out" 2>/dev/null || echo 0)
+        fi
+
+        local now="${EPOCHSECONDS:-$(date +%s)}"
+        local elapsed=$((now - start_time))
+        [ "$elapsed" -le 0 ] && elapsed=1
+        local speed_bps=$((curr / elapsed))
+
+        local curr_tenths=$(( curr * 10 / 1048576 ))
+        local speed_tenths=$(( speed_bps * 10 / 1048576 ))
+        local curr_mib="$((curr_tenths / 10)).$((curr_tenths % 10))"
+        local speed_mib="$((speed_tenths / 10)).$((speed_tenths % 10))"
+
+        local bar_width=$((cols - 66))
+        [ "$bar_width" -lt 12 ] && bar_width=12
+
+        local pct=0
+        local eta_str="--:--"
+        if [ "$total" -gt 0 ]; then
+            pct=$((curr * 100 / total))
+            [ "$pct" -gt 100 ] && pct=100
+            local rem_bytes=$((total - curr))
+            local eta_sec=0
+            [ "$speed_bps" -gt 0 ] && eta_sec=$((rem_bytes / speed_bps))
+            if [ "$eta_sec" -lt 3600 ]; then
+                printf -v eta_str "%02d:%02d" $((eta_sec / 60)) $((eta_sec % 60))
+            fi
+        fi
+
+        local filled=$((pct * bar_width / 100))
+        [ "$filled" -lt 1 ] && filled=1
+        [ "$filled" -gt "$bar_width" ] && filled="$bar_width"
+
+        local bar=""
+        local pos
+        local limit=$((bar_width + 1))
+        for ((pos=1; pos!=limit; pos++)); do
+            if [ "$pos" -lt "$filled" ]; then
+                bar+="-"
+            elif [ "$pos" -eq "$filled" ]; then
+                if [ $((frame % 2)) -eq 0 ]; then
+                    bar+="${C_YELLOW}C${C_RESET}"
+                else
+                    bar+="${C_YELLOW}c${C_RESET}"
+                fi
+            else
+                if [ $((pos % 3)) -eq 0 ]; then
+                    bar+="o"
+                else
+                    bar+=" "
+                fi
+            fi
+        done
+
+        printf "\r\033[K  %-18.18s %6s MiB  %5s MiB/s %5s [%b] %3d%%" \
+            "$label" "$curr_mib" "$speed_mib" "$eta_str" "$bar" "$pct"
+
+        frame=$((frame + 1))
+        sleep 0.12
+    done
+
+    wait "$pid"
+    local exit_code=$?
+    rm -f "$hdr"
+
+    if [ "$exit_code" -ne 0 ] || [ ! -s "$out" ]; then
+        tput cnorm 2>/dev/null || true
+        echo ""
+        echo -e "  ${C_RED}Error: Download failed with exit code $exit_code.${C_RESET}" >&2
+        return 1
+    fi
+
+    local curr=0
+    [ -f "$out" ] && curr=$(stat -c%s "$out" 2>/dev/null || echo 0)
+    local now="${EPOCHSECONDS:-$(date +%s)}"
+    local elapsed=$((now - start_time))
+    [ "$elapsed" -le 0 ] && elapsed=1
+    local speed_bps=$((curr / elapsed))
+    local curr_tenths=$(( curr * 10 / 1048576 ))
+    local speed_tenths=$(( speed_bps * 10 / 1048576 ))
+    local curr_mib="$((curr_tenths / 10)).$((curr_tenths % 10))"
+    local speed_mib="$((speed_tenths / 10)).$((speed_tenths % 10))"
+    local elapsed_str
+    printf -v elapsed_str "%02d:%02d" $((elapsed / 60)) $((elapsed % 60))
+
+    local bar_width=$((cols - 66))
+    [ "$bar_width" -lt 12 ] && bar_width=12
+    local full_bar=""
+    local pos
+    for ((pos=1; pos!=bar_width; pos++)); do full_bar+="-"; done
+    full_bar+="${C_YELLOW}c${C_RESET}"
+
+    printf "\r\033[K  %-18.18s %6s MiB  %5s MiB/s %5s [%b] 100%%\n" \
+        "$label" "$curr_mib" "$speed_mib" "$elapsed_str" "$full_bar"
+
+    tput cnorm 2>/dev/null || true
+    return 0
+}
+
+fetch_page() {
+    curl -fsSL --max-time 10 --compressed -A "$USER_AGENT" "$1" 2>/dev/null | tr -d '\0' || true
+}
+
+content_matches() {
+    local pattern="$1"
+    local text="$2"
+    printf '%s\n' "$text" | grep -iE "$pattern" >/dev/null 2>&1
+}
+
+slugify() {
+    echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g'
+}
+
+detect_pkg_format() {
+    local input="${1,,}"
+    input="${input%%\?*}"
+    if [[ "$input" =~ \.appimage$ ]]; then
+        echo "AppImage"
+    elif [[ "$input" =~ \.(tar\.xz|txz)$ ]]; then
+        echo "tar.xz"
+    elif [[ "$input" =~ \.tar\.zst$ ]]; then
+        echo "tar.zst"
+    elif [[ "$input" =~ \.(tar\.bz2|tbz2)$ ]]; then
+        echo "tar.bz2"
+    elif [[ "$input" =~ \.(tar\.gz|tgz)$ ]]; then
+        echo "tar.gz"
+    else
+        echo "tar.gz"
+    fi
+}
+
+format_badge() {
+    local fmt="$1"
+    case "${fmt,,}" in
+        appimage) echo "[APPIMAGE]" ;;
+        tar.xz|txz) echo "[TAR.XZ]" ;;
+        tar.zst) echo "[TAR.ZST]" ;;
+        tar.bz2|tbz2) echo "[TAR.BZ2]" ;;
+        tar.gz|tgz) echo "[TAR.GZ]" ;;
+        *) echo "[${fmt^^}]" ;;
+    esac
+}
+
+clean_pkgname() {
+    local url="$1"
+    local fname
+    fname=$(basename "${url%%\?*}")
+    fname="${fname//%20/-}"
+    fname="${fname// /-}"
+    local raw="$fname"
+    raw="${raw%.AppImage}"
+    raw="${raw%.appimage}"
+    raw="${raw%.tar.gz}"
+    raw="${raw%.tgz}"
+    raw="${raw%.tar.xz}"
+    raw="${raw%.txz}"
+    raw="${raw%.tar.zst}"
+    raw="${raw%.tar.bz2}"
+    raw="${raw%.tbz2}"
+    echo "$raw" | sed -E 's/[-_][0-9]{7,}//g; s/[-_]v?[0-9]+\.[0-9]+.*//; s/[-_](linux|x86_64|amd64|x64|arm64|aarch64|armhf|arm32)$//I' | tr '[:upper:]' '[:lower:]'
+}
+
+sanitize_input_path() {
+    local raw="$1"
+    # Trim leading and trailing whitespace
+    raw="$(printf '%s' "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+    # Strip enclosing single or double quotes first
+    raw=$(printf '%s' "$raw" | sed -E "s/^['\"]+|['\"]+$//g")
+
+    # If it is an HTTP or HTTPS URL, leave as URL
+    if [[ "$raw" =~ ^https?:// ]]; then
+        echo "$raw"
+        return 0
+    fi
+
+    # Strip 'file://' URI scheme
+    raw=$(printf '%s' "$raw" | sed -E "s/^file:\/\///")
+
+    # URL-decode percent-encoded characters (e.g. %20 -> space)
+    raw="$(printf '%b' "${raw//%/\\x}")"
+
+    # Unescape backslash-escaped characters
+    raw="${raw//\\ / }"
+    raw="${raw//\\(/ (}"
+    raw="${raw//\\)/ )}"
+    raw="${raw//\\\[/ \[}"
+    raw="${raw//\\\]/ \]}"
+    raw="${raw//\\&/ &}"
+
+    # Expand tilde ~
+    if [[ "$raw" == "~"* ]]; then
+        raw="${HOME}${raw:1}"
+    fi
+
+    # Return canonical absolute path if file exists
+    if [ -e "$raw" ]; then
+        realpath "$raw" 2>/dev/null || readlink -f "$raw" 2>/dev/null || echo "$raw"
+        return 0
+    fi
+
+    echo "$raw"
+}
+
+detect_arch_label() {
+    local url="${1,,}"
+    if [[ "$url" =~ (armhf|arm32|armv7|armv6|linux-arm32) ]]; then
+        echo "arm32"
+    elif [[ "$url" =~ (arm64|aarch64|linux-arm|[-_/]arm[-_/.]) ]]; then
+        echo "arm64"
+    elif [[ "$url" =~ (i386|i686|ia32|linux32|[-_/]x86[-_/.]) ]]; then
+        echo "x86"
+    else
+        echo "x86_64"
+    fi
+}
+
+is_valid_image() {
+    local file="$1"
+    [ -s "$file" ] || return 1
+    local head_chunk
+    head_chunk=$(head -c 512 "$file" 2>/dev/null | tr -d '\0' || true)
+    if printf '%s\n' "$head_chunk" | grep -qiE '[<]!doctype html|[<]html|[<]head|[<]body'; then
+        return 1
+    fi
+    if printf '%s\n' "$head_chunk" | grep -qi '[<]svg' || [[ "${file,,}" =~ \.svg(\?.*)?$ ]]; then
+        # Exclude SVG sprite sheets that only contain symbol definitions or display:none
+        if grep -qiE 'style=["\x27][^"\x27]*display:[[:space:]]*none' "$file" 2>/dev/null; then
+            return 1
+        fi
+        if grep -qi '<symbol' "$file" 2>/dev/null && ! grep -qiE '<(path|rect|circle|polygon|ellipse|polyline|image)[^>]*>' "$file" 2>/dev/null; then
+            return 1
+        fi
+        if command -v rsvg-convert &>/dev/null; then
+            local tmp_chk
+            tmp_chk=$(mktemp "/tmp/${CMD_NAME:-pkgapps}-svgchk-XXXXXX.png")
+            if ! rsvg-convert -w 32 "$file" -o "$tmp_chk" 2>/dev/null || [ ! -s "$tmp_chk" ]; then
+                rm -f "$tmp_chk"
+                return 1
+            fi
+            rm -f "$tmp_chk"
+        fi
+        return 0
+    fi
+    if command -v file &>/dev/null; then
+        local mime
+        mime=$(file -b --mime-type "$file" 2>/dev/null || echo "")
+        if [[ "$mime" =~ ^image/ ]]; then
+            return 0
+        fi
+    fi
+    if [[ "${file,,}" =~ \.(png|svg|ico|webp|jpg|jpeg|bmp|avif)$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
+purge_app_user_data() {
+    local app_slug="$1"
+    local app_pretty="${2:-}"
+    [ -z "$app_slug" ] && return 0
+
+    case "${app_slug,,}" in
+        ""|"."|".."|"root"|"home"|"config"|"cache"|"local"|"share"|"state"|"bin"|"lib"|"etc")
+            return 0
+            ;;
+    esac
+
+    local -a candidate_dirs=(
+        "${XDG_CONFIG_HOME:-$HOME/.config}/${app_slug}"
+        "${XDG_CACHE_HOME:-$HOME/.cache}/${app_slug}"
+        "${XDG_DATA_HOME:-$HOME/.local/share}/${app_slug}"
+        "${XDG_STATE_HOME:-$HOME/.local/state}/${app_slug}"
+    )
+
+    if [ -n "$app_pretty" ] && [ "${app_pretty}" != "${app_slug}" ]; then
+        local stripped_pretty="${app_pretty// /}"
+        candidate_dirs+=(
+            "${XDG_CONFIG_HOME:-$HOME/.config}/${stripped_pretty}"
+            "${XDG_CACHE_HOME:-$HOME/.cache}/${stripped_pretty}"
+            "${XDG_DATA_HOME:-$HOME/.local/share}/${stripped_pretty}"
+            "${XDG_STATE_HOME:-$HOME/.local/state}/${stripped_pretty}"
+        )
+    fi
+
+    local dir
+    for dir in "${candidate_dirs[@]}"; do
+        if [[ "$dir" =~ ^${HOME}/(\.config|\.cache|\.local/share|\.local/state)/.+ ]] && [ -d "$dir" ]; then
+            echo -e "  ${C_YELLOW}::${C_RESET} Purging user data: ${C_DIM}${dir}${C_RESET}"
+            rm -rf "$dir"
+        fi
+    done
+}
+
+compare_versions() {
+    local v1="$1"
+    local v2="$2"
+    if command -v vercmp &>/dev/null; then
+        vercmp "$v1" "$v2"
+    elif [ "$v1" = "$v2" ]; then
+        echo 0
+    else
+        echo 1
+    fi
+}
+
+# ==============================================================================
+# MODE 1: Initialize Environment (-i)
+# ==============================================================================
+init_environment() {
+    systemctl --user disable --now "${CMD_NAME}.timer" 2>/dev/null || true
+    rm -f "${HOME}/.config/systemd/user/${CMD_NAME}.service" \
+          "${HOME}/.config/systemd/user/${CMD_NAME}.timer"
+
+    echo -e "  ${C_CYAN}==> [1/4]${C_RESET} Creating repository directory at ${REPO_DIR}..."
+    sudo mkdir -p "$REPO_DIR"
+    sudo chown -R "$USER:$USER" "$REPO_DIR"
+    chmod 755 "$REPO_DIR"
+
+    if [ ! -f "$REPO_DB" ]; then
+        echo -e "  ${C_CYAN}==> [2/4]${C_RESET} Initializing empty Pacman database (${REPO_NAME})..."
+        tar -czf "$REPO_DB" -T /dev/null
+        ln -sf "${REPO_NAME}.db.tar.gz" "${REPO_DIR}/${REPO_NAME}.db"
+    else
+        echo -e "  ${C_CYAN}==> [2/4]${C_RESET} Repository database already exists."
+    fi
+
+    if ! grep -q "\[${REPO_NAME}\]" /etc/pacman.conf; then
+        echo -e "  ${C_CYAN}==> [3/4]${C_RESET} Registering repository [${REPO_NAME}] in /etc/pacman.conf..."
+        printf '%s\n' \
+            "" \
+            "[${REPO_NAME}]" \
+            "SigLevel = Optional TrustAll" \
+            "Server = file://${REPO_DIR}" \
+            | sudo tee -a /etc/pacman.conf >/dev/null
+    else
+        echo -e "  ${C_CYAN}==> [3/4]${C_RESET} Repository [${REPO_NAME}] is already registered in /etc/pacman.conf."
+    fi
+
+    echo -e "  ${C_CYAN}==> [4/4]${C_RESET} Configuring automatic Pacman uninstall hook..."
+    sudo mkdir -p /etc/pacman.d/hooks
+    printf '%s\n' \
+        "[Trigger]" \
+        "Operation = Remove" \
+        "Type = Package" \
+        "Target = *-bin" \
+        "" \
+        "[Action]" \
+        "Description = Removing application from local repository [$REPO_NAME]..." \
+        "When = PostTransaction" \
+        "Exec = /usr/bin/runuser -u ${USER} -- ${SCRIPT_PATH} --hook-remove" \
+        "NeedsTargets" \
+        | sudo tee "/etc/pacman.d/hooks/${REPO_NAME}-cleanup.hook" >/dev/null
+
+    sudo pacman -Sy
+    echo -e "  ${C_GREEN}==> Done! Environment initialized successfully.${C_RESET}"
+}
+
+# ==============================================================================
+# MODE 2: Universal Web Crawler & URL Resolver
+# ==============================================================================
+resolve_redirect_to_tar() {
+    local test_url="$1"
+    local hdr_file
+    hdr_file=$(mktemp "/tmp/${CMD_NAME}-hdr-XXXXXX")
+
+    local meta http_code eff_url content_type rest_meta
+    meta=$(curl -sIL --max-time 6 -A "$USER_AGENT" -D "$hdr_file" -o /dev/null -w '%{http_code}|%{content_type}|%{url_effective}' "$test_url" 2>/dev/null || true)
+    http_code="${meta%%|*}"
+    rest_meta="${meta#*|}"
+    content_type="${rest_meta%%|*}"
+    eff_url="${rest_meta#*|}"
+
+    if [[ "$http_code" != "200" && "$http_code" != "206" ]]; then
+        : > "$hdr_file"
+        meta=$(curl -sSL --max-time 7 -r 0-0 -A "$USER_AGENT" -D "$hdr_file" -o /dev/null -w '%{http_code}|%{content_type}|%{url_effective}' "$test_url" 2>/dev/null || true)
+        http_code="${meta%%|*}"
+        rest_meta="${meta#*|}"
+        content_type="${rest_meta%%|*}"
+        eff_url="${rest_meta#*|}"
+    fi
+
+    if [[ "$http_code" != "200" && "$http_code" != "206" ]]; then
+        rm -f "$hdr_file"
+        return 1
+    fi
+
+    if printf '%s\n' "$content_type" | grep -qi 'text/html'; then
+        rm -f "$hdr_file"
+        return 1
+    fi
+
+    if [[ "$eff_url" =~ \.(tar\.gz|tgz|tar\.xz|txz|tar\.bz2|tbz2|tar\.zst|AppImage)(\?.*)?$ ]]; then
+        rm -f "$hdr_file"
+        if ! printf '%s\n' "$eff_url" | grep -qiE 'darwin|macos|osx|win32|windows|\.exe|\.dmg|\.msi'; then
+            echo "$eff_url"
+            return 0
+        fi
+    fi
+
+    if grep -qiE 'content-disposition:.*\.(tar\.gz|tgz|tar\.xz|txz|tar\.bz2|tbz2|tar\.zst|AppImage)' "$hdr_file" 2>/dev/null; then
+        rm -f "$hdr_file"
+        echo "${eff_url:-$test_url}"
+        return 0
+    fi
+
+    rm -f "$hdr_file"
+    return 1
+}
+
+extract_github_release_tars() {
+    local repo_path="$1"
+    local api_url="https://api.github.com/repos/${repo_path}/releases/latest"
+    local json
+    json=$(fetch_page "$api_url")
+    [ -z "$json" ] && return 1
+
+    printf '%s\n' "$json" | grep -oE 'https://github\.com/[^"'\'' <>\\]+\.(tar\.gz|tgz|tar\.xz|txz|tar\.bz2|tbz2|tar\.zst|AppImage)' \
+        | grep -ivE 'darwin|macos|osx|win32|windows|source' || true
+}
+
+scan_single_page_for_tars() {
+    local page_url="$1"
+    local base_domain
+    base_domain=$(printf '%s\n' "$page_url" | grep -oE '^https?://[^/]+' || true)
+    [ -z "$base_domain" ] && return 1
+
+    local html
+    html=$(fetch_page "$page_url")
+    [ -z "$html" ] && return 1
+
+    local clean_html
+    clean_html=$(printf '%s\n' "$html" | sed 's|\\/|/|g; s|\\u002[fF]|/|g; s|\\u003[dD]|=|g; s|\\u0026|\&|g; s|&amp;|\&|g')
+    local all_content="$clean_html"
+
+    local raw_candidates=""
+    local redirect_to_probe=""
+
+    # 1A. Full absolute URLs
+    local direct_abs
+    direct_abs=$(printf '%s\n' "$all_content" | grep -oE 'https?://[^"'\'' <>\\()`]+\.(tar\.gz|tgz|tar\.xz|txz|tar\.bz2|tbz2|tar\.zst|AppImage)(\?[^"'\'' <>\\()`]*)?' \
+        | grep -ivE 'darwin|macos|osx|win32|windows' || true)
+    [ -n "$direct_abs" ] && raw_candidates+=$'\n'"$direct_abs"
+
+    # 1B. Relative links in explicit HTML href="..."
+    local direct_rel
+    direct_rel=$(printf '%s\n' "$clean_html" | grep -oE 'href="/[^"'\'' <>\\()`]+\.(tar\.gz|tgz|tar\.xz|txz|tar\.bz2|tbz2|tar\.zst|AppImage)(\?[^"'\'' <>\\()`]*)?"' \
+        | sed -E 's/^href="//; s/"$//' \
+        | sed "s|^/|${base_domain}/|" \
+        | grep -ivE 'darwin|macos|osx|win32|windows' || true)
+    [ -n "$direct_rel" ] && raw_candidates+=$'\n'"$direct_rel"
+
+    # 2. Redirect endpoints
+    local redirect_candidates
+    redirect_candidates=$(printf '%s\n' "$all_content" | grep -oE '(https?://[^"'\'' <>\\()`]+|href="/[a-zA-Z0-9_./-]+(\?[^"'\'' <>\\()`]+)?")' \
+        | sed -E 's/^href="//; s/"$//' \
+        | grep -iE '(format=tar|os=linux|platform=linux|dv=linux|arch=x64|arch=arm|sha/download|/download/linux|/latest/linux)' \
+        | grep -ivE '\.(deb|rpm|exe|dmg|msi|zip|flatpak|snap)(\?|$)|darwin|macos|osx|win32|windows' \
+        | sed "s|^/|${base_domain}/|" | sort -u || true)
+    [ -n "$redirect_candidates" ] && redirect_to_probe+=$'\n'"$redirect_candidates"
+
+    # 3. Dedicated rules for Visual Studio Code
+    if content_matches 'sha/download|code\.visualstudio\.com|dv=linux|update\.code\.visualstudio\.com' "$all_content"; then
+        for arch_q in "linux-x64" "linux-arm64" "linux-armhf"; do
+            redirect_to_probe+=$'\n'"${base_domain}/sha/download?build=stable&os=${arch_q}"
+            redirect_to_probe+=$'\n'"https://code.visualstudio.com/sha/download?build=stable&os=${arch_q}"
+        done
+    fi
+
+    # 4. Dedicated rules for Discord API endpoints
+    if content_matches 'api/download\?platform=linux|discordapp\.com|discord\.com/api/download' "$all_content"; then
+        redirect_to_probe+=$'\n'"${base_domain}/api/download?platform=linux&format=tar.gz"
+    fi
+
+    # 5. Dedicated rules for Google Antigravity
+    local latest_ver
+    latest_ver=$(printf '%s\n' "$all_content" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]{10,}' | sort -uV | tail -n 1 || true)
+    if [ -n "$latest_ver" ]; then
+        for arch_dir in "linux-x64" "linux-arm"; do
+            raw_candidates+=$'\n'"https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/${latest_ver}/${arch_dir}/Antigravity.tar.gz"
+            raw_candidates+=$'\n'"https://storage.googleapis.com/antigravity-public/antigravity-hub/${latest_ver}/${arch_dir}/Antigravity.tar.gz"
+        done
+    fi
+
+    # 6. GitHub Releases
+    local gh_repos
+    gh_repos=$(printf '%s\n' "$all_content" | grep -oE 'https?://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+/releases' \
+        | sed -E 's|https?://github\.com/||; s|/releases.*||' | sort -u | sed -n '1,5p' || true)
+    if [[ "$page_url" =~ ^https?://github\.com/([^/]+/[^/]+) ]]; then
+        gh_repos+=$'\n'"${BASH_REMATCH[1]}"
+    fi
+    local repo
+    for repo in $(printf '%s\n' "$gh_repos" | sort -u); do
+        [ -z "$repo" ] && continue
+        local gh_tars
+        gh_tars=$(extract_github_release_tars "$repo" || true)
+        [ -n "$gh_tars" ] && raw_candidates+=$'\n'"$gh_tars"
+    done
+
+    # 7. Fallback: only scan JS bundles if no candidate was found in the initial HTML
+    if [ -z "$raw_candidates" ] && [ -z "$redirect_to_probe" ]; then
+        local js_urls
+        js_urls=$(printf '%s\n' "$clean_html" | grep -oE '(src|href)="[^"]+\.m?js(\?[^"]*)?"' \
+            | sed -E 's/^(src|href)="//; s/"$//' \
+            | sed "s|^//|https://|; s|^/|${base_domain}/|" | sort -u | sed -n '1,5p' || true)
+
+        local js
+        for js in $js_urls; do
+            [[ "$js" =~ ^http ]] || continue
+            local js_content
+            js_content=$(fetch_page "$js" | sed 's|\\/|/|g; s|\\u002[fF]|/|g; s|\\u003[dD]|=|g; s|\\u0026|\&|g; s|&amp;|\&|g')
+            if [ -n "$js_content" ]; then
+                local js_abs
+                js_abs=$(printf '%s\n' "$js_content" | grep -oE 'https?://[^"'\'' <>\\()`]+\.(tar\.gz|tgz|tar\.xz|txz|tar\.bz2|tbz2|tar\.zst|AppImage)(\?[^"'\'' <>\\()`]*)?' \
+                    | grep -ivE 'darwin|macos|osx|win32|windows' || true)
+                [ -n "$js_abs" ] && raw_candidates+=$'\n'"$js_abs"
+            fi
+        done
+    fi
+
+    local all_to_verify
+    all_to_verify=$(printf "%s\n%s\n" "$raw_candidates" "$redirect_to_probe" | sed '/^$/d' | sort -u)
+    [ -z "$all_to_verify" ] && return 1
+
+    local tmp_verify tmp_results
+    tmp_verify=$(mktemp "/tmp/${CMD_NAME}-verify-XXXXXX")
+    tmp_results=$(mktemp "/tmp/${CMD_NAME}-scan-XXXXXX")
+    printf '%s\n' "$all_to_verify" > "$tmp_verify"
+
+    local job_count=0
+    while IFS= read -r cand_url; do
+        [ -z "$cand_url" ] && continue
+        (
+            local resolved
+            if resolved=$(resolve_redirect_to_tar "$cand_url"); then
+                echo "$resolved" >> "$tmp_results"
+            fi
+        ) &
+        job_count=$((job_count + 1))
+        if [ "$job_count" -ge 10 ]; then
+            wait -n 2>/dev/null || wait
+            job_count=$((job_count - 1))
+        fi
+    done < "$tmp_verify"
+    wait
+
+    local verified_results=""
+    if [ -s "$tmp_results" ]; then
+        verified_results=$(sort -u "$tmp_results")
+    fi
+    rm -f "$tmp_verify" "$tmp_results"
+
+    [ -z "$verified_results" ] && return 1
+    echo "$verified_results"
+    return 0
+}
+
+resolve_all_tar_urls() {
+    local raw_input="$1"
+    local input_url="${raw_input//\\/}"
+
+    if [[ "$input_url" =~ \.(tar\.gz|tgz|tar\.xz|txz|tar\.bz2|tbz2|tar\.zst|AppImage)(\?.*)?$ ]]; then
+        echo "$input_url"
+        return 0
+    fi
+
+    echo -e "  ${C_CYAN}::${C_RESET} Scanning ${C_TEXT}${input_url}${C_RESET} for Linux packages (.tar.* / .AppImage)..." >&2
+
+    local base_domain
+    base_domain=$(printf '%s\n' "$input_url" | grep -oE '^https?://[^/]+' || true)
+
+    if [[ "$input_url" =~ (dv=linux|os=linux) ]]; then
+        local vs_arch="linux-x64"
+        [[ "$input_url" =~ (arm64|aarch64) ]] && vs_arch="linux-arm64"
+        [[ "$input_url" =~ (armhf|arm32) ]] && vs_arch="linux-armhf"
+        local direct_redir
+        if direct_redir=$(resolve_redirect_to_tar "${base_domain}/sha/download?build=stable&os=${vs_arch}"); then
+            echo "$direct_redir"
+            return 0
+        fi
+    fi
+
+    local direct_redir
+    if direct_redir=$(resolve_redirect_to_tar "$input_url"); then
+        echo "$direct_redir"
+        return 0
+    fi
+
+    local found_links=""
+    if found_links=$(scan_single_page_for_tars "$input_url"); then
+        echo "$found_links"
+        return 0
+    fi
+
+    echo -e "  ${C_CYAN}::${C_RESET} Exploring download subpages on ${C_TEXT}${base_domain}${C_RESET}..." >&2
+    local root_html
+    root_html=$(fetch_page "$input_url")
+    local domain_host
+    domain_host=$(printf '%s\n' "$base_domain" | sed -E 's|^https?://||')
+
+    local discovered_subpages=""
+    if [ -n "$root_html" ]; then
+        discovered_subpages=$(printf '%s\n' "$root_html" | grep -oE 'href="[^"]+"' | cut -d'"' -f2 \
+            | sed -E 's/#[^"]*$//' \
+            | grep -iE '/(download|descarga|linux|release|releases|install|get|packages|bins)' \
+            | grep -ivE '\.(css|js|png|jpg|jpeg|gif|svg|ico|webp|json|xml|pdf|zip|exe|dmg|deb|rpm)(\?|$)' \
+            | sed -E "s|^//|https://|; s|^/|${base_domain}/|" \
+            | grep -E "^https?://([a-zA-Z0-9_-]+\.)?${domain_host}" \
+            | sort -u | sed -n '1,12p' || true)
+    fi
+
+    local tmp_subs
+    tmp_subs=$(mktemp "/tmp/${CMD_NAME}-subs-XXXXXX")
+    printf "%s\n%s\n%s\n%s\n%s\n%s\n%s\n" \
+        "$discovered_subpages" \
+        "${base_domain}/Download" \
+        "${base_domain}/download" \
+        "${base_domain}/downloads" \
+        "${base_domain}/linux" \
+        "${base_domain}/install" \
+        "${base_domain}/releases" | sed '/^$/d' | awk '!seen[$0]++' > "$tmp_subs"
+
+    while IFS= read -r sub; do
+        [ -z "$sub" ] && continue
+        [ "${sub%/}" = "${input_url%/}" ] && continue
+        if found_links=$(scan_single_page_for_tars "$sub"); then
+            rm -f "$tmp_subs"
+            echo "$found_links"
+            return 0
+        fi
+    done < "$tmp_subs"
+
+    rm -f "$tmp_subs"
+    return 1
+}
+
+# ==============================================================================
+# Helper: Check if a name/slug is duplicated
+# ==============================================================================
+check_name_conflict() {
+    local check_slug="$1"
+    local check_pretty="$2"
+
+    if [ -z "$check_slug" ]; then
+        echo "Name cannot be empty."
+        return 1
+    fi
+
+    if pacman -Qi "${check_slug}-bin" &>/dev/null || pacman -Qi "${check_slug}" &>/dev/null; then
+        echo "Package '${check_slug}-bin' is already installed in Pacman!"
+        return 1
+    fi
+    if [ -d "${APP_BASE_DIR}/${check_slug}" ]; then
+        echo "Directory '${APP_BASE_DIR}/${check_slug}' already exists!"
+        return 1
+    fi
+    if grep -qi "^${check_slug}|" "$SOURCES_FILE" 2>/dev/null; then
+        echo "'${check_slug}' is already registered in [${REPO_NAME}]!"
+        return 1
+    fi
+    if grep -qi "^Name=${check_pretty}$" /usr/share/applications/*.desktop "$HOME/.local/share/applications/"*.desktop 2>/dev/null; then
+        echo "Desktop name '${check_pretty}' is already used by another installed application!"
+        return 1
+    fi
+
+    return 0
+}
+
+# ==============================================================================
+# Helper: Real-Time Name Editor (With Omarchy Header & Live Table)
+# ==============================================================================
+NEW_PRETTY_NAME=""
+NEW_PKGNAME=""
+
+edit_app_name_realtime() {
+    local current_pretty="$1"
+    local current_slug="$2"
+    local input="$current_pretty"
+    local key=""
+
+    render_header "Real-Time Application Name Editor (Backspace edit • Ctrl+U clear • Esc cancel)"
+
+    tput civis 2>/dev/null || true
+    tput sc 2>/dev/null || true
+
+    while true; do
+        local cand_slug
+        cand_slug=$(slugify "$input")
+        local conflict_msg=""
+        local is_dup=0
+        local status_txt=""
+
+        if ! conflict_msg=$(check_name_conflict "$cand_slug" "$input"); then
+            is_dup=1
+        fi
+
+        if [ -z "$cand_slug" ]; then
+            status_txt="[!] Name cannot be empty"
+        elif [ "$is_dup" -eq 1 ]; then
+            status_txt="[!] DUPLICATE: ${conflict_msg}"
+        else
+            status_txt="[OK] Available"
+        fi
+
+        tput rc 2>/dev/null || printf "\r"
+        tput ed 2>/dev/null || true
+
+        render_table \
+            "Current Name" "${current_pretty} (${current_slug}-bin)" \
+            "New Desktop Name" "${input}_" \
+            "Live Status" "${status_txt}" \
+            "Preview Package" "${cand_slug:-none}-bin" \
+            "Preview Path" "${APP_BASE_DIR}/${cand_slug:-none}"
+
+        echo -e "  ${C_DIM}enter save name • esc cancel and return${C_RESET}"
+
+        IFS= read -rsn1 key < /dev/tty || true
+
+        if [[ -z "$key" ]]; then
+            if [ -n "$cand_slug" ] && [ "$is_dup" -eq 0 ]; then
+                NEW_PRETTY_NAME="$input"
+                NEW_PKGNAME="$cand_slug"
+                break
+            fi
+            printf "\a"
+            continue
+        fi
+
+        if [[ "$key" == $'\x1b' ]]; then
+            local seq=""
+            read -rsn2 -t 0.05 seq < /dev/tty || true
+            if [[ -z "$seq" ]]; then
+                NEW_PRETTY_NAME="$current_pretty"
+                NEW_PKGNAME="$current_slug"
+                break
+            fi
+            continue
+        fi
+
+        if [[ "$key" == $'\x7f' || "$key" == $'\x08' ]]; then
+            [ "${#input}" -gt 0 ] && input="${input%?}"
+            continue
+        fi
+
+        if [[ "$key" == $'\x15' ]]; then
+            input=""
+            continue
+        fi
+
+        if [[ "$key" =~ ^[[:alnum:][:space:]._+()-]$ ]]; then
+            input+="$key"
+        fi
+    done
+
+    tput cnorm 2>/dev/null || true
+}
+
+# ==============================================================================
+# Helper: Apply & Render Icon in Terminal (Foot / Sixel / Chafa)
+# ==============================================================================
+ICON_EXT="png"
+ICON_SOURCE_DESC=""
+CUSTOM_ICON_REF=""
+
+normalize_and_copy_icon() {
+    local in_file="$1"
+    local dest_dir="$2"
+    rm -f "${dest_dir}/app_icon.svg" "${dest_dir}/app_icon.png"
+
+    local is_svg=0
+    local head_chunk
+    head_chunk=$(head -c 512 "$in_file" 2>/dev/null | tr -d '\0' || true)
+    if [[ "${in_file,,}" =~ \.svg(\?.*)?$ ]] || printf '%s\n' "$head_chunk" | grep -qi '[<]svg'; then
+        if is_valid_image "$in_file"; then
+            is_svg=1
+        fi
+    fi
+
+    if [ "$is_svg" -eq 1 ]; then
+        ICON_EXT="svg"
+        cp -L "$in_file" "${dest_dir}/app_icon.svg"
+        return 0
+    fi
+
+    # Multi-resolution .ico: select highest resolution frame [-1]
+    if [[ "${in_file,,}" =~ \.ico(\?.*)?$ ]] && command -v magick &>/dev/null; then
+        if magick "${in_file}[-1]" -background none -resize 256x256 "${dest_dir}/app_icon.png" 2>/dev/null && [ -s "${dest_dir}/app_icon.png" ]; then
+            ICON_EXT="png"
+            return 0
+        fi
+    fi
+
+    # Multi-format conversion (.webp, .jpg, .jpeg, .bmp, .avif, .png)
+    if command -v magick &>/dev/null; then
+        if magick "$in_file" -background none -resize 256x256 "${dest_dir}/app_icon.png" 2>/dev/null && [ -s "${dest_dir}/app_icon.png" ]; then
+            ICON_EXT="png"
+            return 0
+        fi
+    fi
+
+    # Fallback direct copy (dereferencing symlinks)
+    cp -L "$in_file" "${dest_dir}/app_icon.png"
+    ICON_EXT="png"
+    return 0
+}
+
+apply_custom_icon() {
+    local source_input="$1"
+    local workdir="$2"
+
+    local sanitized
+    sanitized=$(sanitize_input_path "$source_input")
+    [ -z "$sanitized" ] && return 1
+
+    if [[ "$sanitized" =~ ^https?:// ]]; then
+        local tmp_icon="${workdir}/downloaded_custom_icon"
+        if curl -fsSL -A "$USER_AGENT" "$sanitized" -o "$tmp_icon" 2>/dev/null && is_valid_image "$tmp_icon"; then
+            normalize_and_copy_icon "$tmp_icon" "$workdir"
+            ICON_SOURCE_DESC="Custom URL (${sanitized})"
+            CUSTOM_ICON_REF="$sanitized"
+            return 0
+        else
+            echo -e "  ${C_RED}==> Error: Invalid image or failed to download from URL: $sanitized${C_RESET}" >&2
+            sleep 2
+            return 1
+        fi
+    fi
+
+    local resolved_file=""
+    if [ -f "$sanitized" ]; then
+        resolved_file="$sanitized"
+    elif [ -f "$HOME/$source_input" ]; then
+        resolved_file="$(realpath "$HOME/$source_input")"
+    else
+        resolved_file=$(find "$HOME" -maxdepth 3 -ipath "$HOME/$source_input" -type f -print -quit 2>/dev/null || true)
+    fi
+
+    if [ -n "$resolved_file" ] && is_valid_image "$resolved_file"; then
+        normalize_and_copy_icon "$resolved_file" "$workdir"
+        ICON_SOURCE_DESC="Local File (${resolved_file})"
+        CUSTOM_ICON_REF="$resolved_file"
+        return 0
+    fi
+
+    echo -e "  ${C_RED}==> Error: Valid local image file not found: $source_input${C_RESET}" >&2
+    sleep 2
+    return 1
+}
+
+detect_terminal_graphics_proto() {
+    [ "$TERM" = "foot" ] && { echo "sixels"; return 0; }
+    [ -n "${FOOT_TERMINAL:-}" ] && { echo "sixels"; return 0; }
+    [ -n "${KITTY_WINDOW_ID:-}" ] || [ "$TERM" = "xterm-kitty" ] && { echo "kitty"; return 0; }
+    [ -n "${GHOSTTY_RESOURCES_DIR:-}" ] || [ "$TERM" = "xterm-ghostty" ] && { echo "kitty"; return 0; }
+
+    # Walk up the process tree to identify terminal emulator binary (handles Omarchy foot.ini term=xterm-256color)
+    local p=$$
+    local comm
+    while [ "$p" -gt 1 ] 2>/dev/null; do
+        comm=$(ps -o comm= -p "$p" 2>/dev/null | tr -d ' ' || true)
+        case "${comm,,}" in
+            *foot*) echo "sixels"; return 0 ;;
+            *kitty*|*ghostty*|*wezterm*) echo "kitty"; return 0 ;;
+            *alacritty*) echo "symbols"; return 0 ;;
+        esac
+        p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' || true)
+        [ -z "$p" ] && break
+    done
+
+    echo "symbols"
+}
+
+render_terminal_icon_preview() {
+    local icon_file="$1"
+    [ -f "$icon_file" ] || return 0
+
+    echo -e "  ${C_SUBTEXT:-\033[38;2;166;173;200m}Icon Preview:${C_RESET:-\033[0m}"
+    if command -v chafa &>/dev/null; then
+        local proto
+        proto=$(detect_terminal_graphics_proto)
+        case "$proto" in
+            sixels)
+                printf "    "
+                chafa -f sixels --size=8x4 "$icon_file" 2>/dev/null || chafa -f symbols --symbols block+border+quad+sextant --size=8x4 "$icon_file" 2>/dev/null | sed 's/^/    /' || true
+                ;;
+            kitty)
+                printf "    "
+                chafa -f kitty --size=8x4 "$icon_file" 2>/dev/null || chafa -f symbols --symbols block+border+quad+sextant --size=8x4 "$icon_file" 2>/dev/null | sed 's/^/    /' || true
+                ;;
+            *)
+                chafa -f symbols --symbols block+border+quad+sextant --size=8x4 "$icon_file" 2>/dev/null | sed 's/^/    /' || true
+                ;;
+        esac
+    fi
+    echo ""
+}
+
+# ==============================================================================
+# MODE 3: Download, Customize & Build Package (Omarchy TUI)
+# ==============================================================================
+report_package_status() {
+    local pkg_name="$1"
+    local target_ver="$2"
+    local INSTALLED_VER=""
+    if pacman -Q "${pkg_name}-bin" &>/dev/null; then
+        INSTALLED_VER=$(pacman -Q "${pkg_name}-bin" 2>/dev/null | awk '{print $2}' | sed -E 's/-[0-9]+$//')
+    fi
+
+    if [ -n "$INSTALLED_VER" ] && [ "$(compare_versions "$INSTALLED_VER" "$target_ver")" -lt 0 ]; then
+        echo -e "  ${C_YELLOW}↑${C_RESET} [${C_BOLD}${pkg_name}-bin${C_RESET}] Update ready in repo: ${C_YELLOW}v${INSTALLED_VER}${C_RESET} -> ${C_GREEN}v${target_ver}${C_RESET} ${C_DIM}(pending Pacman upgrade)${C_RESET}"
+    else
+        echo -e "  ${C_GREEN}✓${C_RESET} [${C_BOLD}${pkg_name}-bin${C_RESET}] Up to date (${C_GREEN}v${target_ver}${C_RESET})."
+    fi
+}
+
+build_and_install_single() {
+    local TAR_URL="$1"
+    local PAGE_URL="$2"
+    local SAVED_NAME="${3:-}"
+    local AUTO_INSTALL="${4:-yes}"
+    local SAVED_PRETTY="${5:-}"
+    local SAVED_ICON="${6:-}"
+
+    local PKG_FORMAT
+    PKG_FORMAT=$(detect_pkg_format "$TAR_URL")
+    local FORMAT_BADGE
+    FORMAT_BADGE=$(format_badge "$PKG_FORMAT")
+
+    local IS_LOCAL_SOURCE=0
+    local LOCAL_FILE_PATH=""
+    if [[ "$TAR_URL" =~ ^file:// ]]; then
+        IS_LOCAL_SOURCE=1
+        LOCAL_FILE_PATH="${TAR_URL#file://}"
+        LOCAL_FILE_PATH="$(printf '%b' "${LOCAL_FILE_PATH//%/\\x}")"
+    elif [ -f "$TAR_URL" ]; then
+        IS_LOCAL_SOURCE=1
+        LOCAL_FILE_PATH="$TAR_URL"
+    fi
+
+    local FORMAT_LABEL
+    if [ "$IS_LOCAL_SOURCE" -eq 1 ]; then
+        if [ "$PKG_FORMAT" = "AppImage" ]; then
+            FORMAT_LABEL="AppImage (Local File)"
+        else
+            FORMAT_LABEL="Archive .${PKG_FORMAT} (Local File)"
+        fi
+    else
+        if [ "$PKG_FORMAT" = "AppImage" ]; then
+            FORMAT_LABEL="AppImage (Remote URL)"
+        else
+            FORMAT_LABEL="Archive .${PKG_FORMAT} (Remote URL)"
+        fi
+    fi
+
+    local FILENAME
+    FILENAME=$(basename "${TAR_URL%%\?*}")
+    FILENAME="${FILENAME//%20/-}"
+    FILENAME="${FILENAME// /-}"
+    if [ "$PKG_FORMAT" = "AppImage" ]; then
+        [[ "$FILENAME" =~ \.(AppImage|appimage)$ ]] || FILENAME="${FILENAME}.AppImage"
+    else
+        if [[ ! "$FILENAME" =~ \.(tar\.gz|tgz|tar\.xz|txz|tar\.zst|tar\.bz2|tbz2)$ ]]; then
+            FILENAME="${FILENAME}.${PKG_FORMAT}"
+        fi
+    fi
+
+    local ORIG_SLUG
+    ORIG_SLUG=$(clean_pkgname "$TAR_URL")
+    local ARCH_TAG
+    ARCH_TAG=$(detect_arch_label "$TAR_URL")
+
+    if [[ "$ARCH_TAG" != "x86_64" && ! "$ORIG_SLUG" =~ $ARCH_TAG$ ]]; then
+        ORIG_SLUG="${ORIG_SLUG}-${ARCH_TAG}"
+    fi
+
+    local PKGNAME="${SAVED_NAME:-$ORIG_SLUG}"
+    local PKGVER
+    PKGVER=$(printf '%s\n' "$TAR_URL" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | sed -n '1p' || true)
+
+    # --------------------------------------------------------------------------
+    # FAST PRE-CHECK (Header & Version First - Zero Redundant Downloads)
+    # --------------------------------------------------------------------------
+    if [ "$AUTO_INSTALL" = "no" ] && [ "$IS_LOCAL_SOURCE" -eq 0 ]; then
+        local EXISTING_PKG
+        EXISTING_PKG=$(find "$REPO_DIR" -maxdepth 1 -name "${PKGNAME}-bin-*.pkg.tar.zst" -print -quit 2>/dev/null || true)
+        if [ -n "$EXISTING_PKG" ]; then
+            local REPO_VER
+            REPO_VER=$(basename "$EXISTING_PKG" | sed -E "s/^${PKGNAME}-bin-//; s/-[0-9]+-(x86_64|aarch64|any)\.pkg\.tar\.zst$//")
+
+            # 1. Compare directly if version was detected in TAR_URL
+            if [ -n "$PKGVER" ] && [ -n "$REPO_VER" ]; then
+                if [ "$(compare_versions "$PKGVER" "$REPO_VER")" -le 0 ]; then
+                    report_package_status "$PKGNAME" "$REPO_VER"
+                    return 0
+                fi
+                echo -e "  ${C_CYAN}::${C_RESET} [${C_BOLD}${PKGNAME}-bin${C_RESET}] New version detected: ${C_YELLOW}${REPO_VER}${C_RESET} -> ${C_GREEN}${PKGVER}${C_RESET}"
+            else
+                # 2. Fast probe of remote HTTP headers (HEAD request)
+                local head_info
+                head_info=$(curl -sIL --max-time 5 -A "$USER_AGENT" "$TAR_URL" 2>/dev/null || true)
+
+                # Check Content-Disposition or Location for version
+                local disp_ver
+                disp_ver=$(printf '%s\n' "$head_info" | grep -iE 'content-disposition|location' | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | sed -n '1p' || true)
+                if [ -n "$disp_ver" ] && [ -n "$REPO_VER" ]; then
+                    if [ "$(compare_versions "$disp_ver" "$REPO_VER")" -le 0 ]; then
+                        report_package_status "$PKGNAME" "$REPO_VER"
+                        return 0
+                    fi
+                    PKGVER="$disp_ver"
+                    echo -e "  ${C_CYAN}::${C_RESET} [${C_BOLD}${PKGNAME}-bin${C_RESET}] New version detected: ${C_YELLOW}${REPO_VER}${C_RESET} -> ${C_GREEN}${PKGVER}${C_RESET}"
+                else
+                    # Check Last-Modified against local compiled package timestamp
+                    local remote_mod
+                    remote_mod=$(printf '%s\n' "$head_info" | grep -i '^last-modified:' | sed -E 's/^[Ll]ast-[Mm]odified:[[:space:]]*//' | tr -d '\r')
+                    if [ -n "$remote_mod" ]; then
+                        local remote_ts local_ts
+                        remote_ts=$(date -d "$remote_mod" +%s 2>/dev/null || true)
+                        local_ts=$(stat -c %Y "$EXISTING_PKG" 2>/dev/null || true)
+                        if [ -n "$remote_ts" ] && [ -n "$local_ts" ] && [ "$remote_ts" -le "$local_ts" ]; then
+                            report_package_status "$PKGNAME" "$REPO_VER"
+                            return 0
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    local WORKDIR
+    WORKDIR=$(mktemp -d "/tmp/${CMD_NAME}-${PKGNAME}-XXXXXX")
+    trap 'cleanup_cursor; [ -n "${WORKDIR:-}" ] && rm -rf "$WORKDIR"; trap - RETURN' RETURN
+    pushd "$WORKDIR" >/dev/null
+
+    if [ "$AUTO_INSTALL" = "yes" ]; then
+        render_header "Fetching & inspecting package payload for ${PKGNAME}..."
+    fi
+
+    if [ "$IS_LOCAL_SOURCE" -eq 1 ]; then
+        echo -e "  ${C_BLUE}::${C_RESET} ${C_BOLD}Using local package file: ${LOCAL_FILE_PATH}...${C_RESET}"
+        if [ ! -f "$LOCAL_FILE_PATH" ]; then
+            echo -e "  ${C_RED}Error: Local file does not exist: $LOCAL_FILE_PATH${C_RESET}" >&2
+            popd >/dev/null
+            return 1
+        fi
+        cp -L "$LOCAL_FILE_PATH" "$FILENAME"
+    else
+        echo -e "  ${C_BLUE}::${C_RESET} ${C_BOLD}Downloading package payload (${FORMAT_BADGE})...${C_RESET}"
+        if ! pacman_download "$TAR_URL" "$FILENAME" "${PKGNAME}"; then
+            echo -e "  ${C_RED}Error: Failed to download archive from $TAR_URL${C_RESET}" >&2
+            popd >/dev/null
+            return 1
+        fi
+    fi
+
+    echo -e "  ${C_BLUE}::${C_RESET} Inspecting package format & extracting contents..."
+    local HARVESTED_DESKTOP=""
+    local HARVESTED_NAME=""
+    local HARVESTED_WMCLASS=""
+    local HARVESTED_CATEGORIES=""
+    local HARVESTED_COMMENT=""
+    local APP_DIR=""
+
+    if [ "$PKG_FORMAT" = "AppImage" ]; then
+        chmod +x "$FILENAME"
+        local extracted_ok=0
+        if "$WORKDIR/$FILENAME" --appimage-extract >/dev/null 2>&1 && [ -d "$WORKDIR/squashfs-root" ]; then
+            extracted_ok=1
+        elif command -v unsquashfs &>/dev/null && unsquashfs -d "$WORKDIR/squashfs-root" -f "$WORKDIR/$FILENAME" >/dev/null 2>&1 && [ -d "$WORKDIR/squashfs-root" ]; then
+            extracted_ok=1
+        fi
+
+        if [ "$extracted_ok" -eq 0 ] || [ ! -d "$WORKDIR/squashfs-root" ]; then
+            echo -e "  ${C_RED}Error: Failed to extract AppImage contents.${C_RESET}" >&2
+            popd >/dev/null
+            return 1
+        fi
+
+        APP_DIR="squashfs-root"
+        HARVESTED_DESKTOP=$(find "$APP_DIR" -maxdepth 1 -name "*.desktop" -print -quit 2>/dev/null || true)
+        if [ -n "$HARVESTED_DESKTOP" ]; then
+            HARVESTED_NAME=$(grep -E '^Name=' "$HARVESTED_DESKTOP" | head -n1 | cut -d= -f2- | tr -d '\r\n' || true)
+            HARVESTED_WMCLASS=$(grep -E '^StartupWMClass=' "$HARVESTED_DESKTOP" | head -n1 | cut -d= -f2- | tr -d '\r\n' || true)
+            HARVESTED_CATEGORIES=$(grep -E '^Categories=' "$HARVESTED_DESKTOP" | head -n1 | cut -d= -f2- | tr -d '\r\n' || true)
+            HARVESTED_COMMENT=$(grep -E '^Comment=' "$HARVESTED_DESKTOP" | head -n1 | cut -d= -f2- | tr -d '\r\n' || true)
+        fi
+
+        if [ -f "$APP_DIR/AppRun" ]; then
+            REL_BIN="AppRun"
+        fi
+    else
+        # Multi-compression tarball (.tar.gz, .tar.xz, .tar.zst, .tar.bz2)
+        if ! tar -tf "$FILENAME" &>/dev/null; then
+            echo -e "  ${C_RED}Error: Downloaded file is not a valid archive.${C_RESET}" >&2
+            popd >/dev/null
+            return 1
+        fi
+
+        mkdir -p extracted
+        tar -xf "$FILENAME" -C extracted
+
+        local TOP_DIRS TOP_FILES
+        TOP_DIRS=$(find extracted -mindepth 1 -maxdepth 1 -type d | wc -l)
+        TOP_FILES=$(find extracted -mindepth 1 -maxdepth 1 -type f | wc -l)
+        if [ "$TOP_DIRS" -eq 1 ] && [ "$TOP_FILES" -eq 0 ]; then
+            APP_DIR=$(find extracted -mindepth 1 -maxdepth 1 -type d)
+        else
+            APP_DIR="extracted"
+        fi
+
+        HARVESTED_DESKTOP=$(find "$APP_DIR" -maxdepth 2 -name "*.desktop" -print -quit 2>/dev/null || true)
+        if [ -n "$HARVESTED_DESKTOP" ]; then
+            HARVESTED_NAME=$(grep -E '^Name=' "$HARVESTED_DESKTOP" | head -n1 | cut -d= -f2- | tr -d '\r\n' || true)
+            HARVESTED_WMCLASS=$(grep -E '^StartupWMClass=' "$HARVESTED_DESKTOP" | head -n1 | cut -d= -f2- | tr -d '\r\n' || true)
+            HARVESTED_CATEGORIES=$(grep -E '^Categories=' "$HARVESTED_DESKTOP" | head -n1 | cut -d= -f2- | tr -d '\r\n' || true)
+            HARVESTED_COMMENT=$(grep -E '^Comment=' "$HARVESTED_DESKTOP" | head -n1 | cut -d= -f2- | tr -d '\r\n' || true)
+        fi
+    fi
+
+    # Smart deterministic version resolution (avoids daily rebuilds on static URLs)
+    if [ -z "$PKGVER" ] && [ -n "$HARVESTED_DESKTOP" ]; then
+        PKGVER=$(grep -E '^X-AppImage-Version=' "$HARVESTED_DESKTOP" | head -n1 | cut -d= -f2- | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | sed -n '1p' || true)
+    fi
+    if [ -z "$PKGVER" ]; then
+        PKGVER=$(basename "$APP_DIR" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | sed -n '1p' || true)
+    fi
+    if [ -z "$PKGVER" ]; then
+        local pkg_json
+        pkg_json=$(find "$APP_DIR" -maxdepth 3 -name "package.json" -print -quit 2>/dev/null || true)
+        if [ -n "$pkg_json" ]; then
+            PKGVER=$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+[^"]*"' "$pkg_json" | sed -n '1p' | cut -d'"' -f4 | tr '-' '_' || true)
+        fi
+    fi
+    if [ -z "$PKGVER" ] && [ "$PKG_FORMAT" != "AppImage" ]; then
+        PKGVER=$(tar -tvf "$FILENAME" 2>/dev/null | awk '{print $4}' | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' | sort | tail -n 1 | tr '-' '.' || true)
+    fi
+    if [ -z "$PKGVER" ]; then
+        PKGVER="0.0.$(sha256sum "$FILENAME" | cut -c1-8)"
+    fi
+
+    if [ "$AUTO_INSTALL" = "no" ]; then
+        local EXISTING_PKG
+        EXISTING_PKG=$(find "$REPO_DIR" -maxdepth 1 -name "${PKGNAME}-bin-*.pkg.tar.zst" -print -quit 2>/dev/null || true)
+        if [ -n "$EXISTING_PKG" ]; then
+            local REPO_VER
+            REPO_VER=$(basename "$EXISTING_PKG" | sed -E "s/^${PKGNAME}-bin-//; s/-[0-9]+-(x86_64|aarch64|any)\.pkg\.tar\.zst$//")
+            if [ "$(compare_versions "$PKGVER" "$REPO_VER")" -le 0 ]; then
+                report_package_status "$PKGNAME" "$REPO_VER"
+                popd >/dev/null
+                return 0
+            fi
+            echo -e "  ==> [${C_BOLD}${PKGNAME}-bin${C_RESET}] New version available: ${C_YELLOW}${REPO_VER}${C_RESET} -> ${C_GREEN}${PKGVER}${C_RESET}"
+        fi
+    fi
+
+    # Multi-stage executable detection (Native ELF binaries first, then launcher scripts)
+    local ALL_BINS
+    ALL_BINS=$(find "$APP_DIR" -maxdepth 3 -type f -executable \
+        ! -name "*.so*" ! -name "*sandbox*" ! -name "*crashpad*" \
+        ! -name "*helper*" ! -name "xdg-*" ! -name "*.sh" ! -name "*.bin" ! -name "*.png" ! -name "*.svg" || true)
+
+    if [ -z "$ALL_BINS" ]; then
+        ALL_BINS=$(find "$APP_DIR" -maxdepth 3 -type f \( -executable -o -name "*.sh" -o -name "*.bin" \) \
+            ! -name "*.so*" ! -name "*sandbox*" ! -name "*crashpad*" \
+            ! -name "*helper*" ! -name "xdg-*" ! -name "*.png" ! -name "*.svg" || true)
+    fi
+
+    local BASE_WORD="${ORIG_SLUG%%-*}"
+    local BIN_PATH_IN_APP=""
+    if [ -z "${REL_BIN:-}" ]; then
+        BIN_PATH_IN_APP=$(printf '%s\n' "$ALL_BINS" | grep -iE "/${ORIG_SLUG}(\.sh)?$|/${BASE_WORD}(\.sh)?$" | sed -n '1p' || true)
+        [ -z "$BIN_PATH_IN_APP" ] && BIN_PATH_IN_APP=$(printf '%s\n' "$ALL_BINS" | grep -i "$BASE_WORD" | sed -n '1p' || true)
+        [ -z "$BIN_PATH_IN_APP" ] && BIN_PATH_IN_APP=$(printf '%s\n' "$ALL_BINS" | sed -n '1p' || true)
+        REL_BIN="${BIN_PATH_IN_APP#$APP_DIR/}"
+    fi
+
+    # Fallback interactive binary selector if none auto-detected in interactive mode
+    if [ -z "$REL_BIN" ] && [ "$AUTO_INSTALL" = "yes" ]; then
+        local tmp_bins="${WORKDIR}/fallback_bins.txt"
+        find "$APP_DIR" -maxdepth 3 -type f ! -name "*.so*" ! -name "*.png" ! -name "*.svg" | head -n 15 > "$tmp_bins"
+        local -a fallback_files=()
+        mapfile -t fallback_files < "$tmp_bins"
+        rm -f "$tmp_bins"
+        if [ "${#fallback_files[@]}" -gt 0 ]; then
+            echo -e "  ${C_YELLOW}::${C_RESET} Select the main executable file for ${PKGNAME}:"
+            local b_idx=1
+            local f_item
+            for f_item in "${fallback_files[@]}"; do
+                echo -e "    [${b_idx}] ${f_item#$APP_DIR/}"
+                b_idx=$((b_idx + 1))
+            done
+            local b_choice=""
+            read -rp "  > Select [1-${#fallback_files[@]}]: " b_choice < /dev/tty || true
+            if [[ "$b_choice" =~ ^[0-9]+$ ]] && [ "$b_choice" -ge 1 ] && [ "$b_choice" -le "${#fallback_files[@]}" ]; then
+                REL_BIN="${fallback_files[$((b_choice - 1))]#$APP_DIR/}"
+            fi
+        fi
+    fi
+
+    if [ -z "$REL_BIN" ]; then
+        echo -e "  ${C_RED}Error: Could not detect a valid executable inside the package.${C_RESET}" >&2
+        popd >/dev/null
+        return 1
+    fi
+
+    ICON_EXT="png"
+    ICON_SOURCE_DESC="None (System fallback icon)"
+    CUSTOM_ICON_REF=""
+
+    local DOMAIN
+    DOMAIN=$(printf '%s\n' "$PAGE_URL" | awk -F/ '{print $3}')
+    local BASE_URL="https://${DOMAIN}"
+
+    if [ -n "$SAVED_ICON" ] && apply_custom_icon "$SAVED_ICON" "$WORKDIR"; then
+        :
+    else
+        # 1. First priority for AppImage: dereference .DirIcon
+        if [ "$PKG_FORMAT" = "AppImage" ] && [ -e "$APP_DIR/.DirIcon" ] && is_valid_image "$APP_DIR/.DirIcon"; then
+            normalize_and_copy_icon "$APP_DIR/.DirIcon" "$WORKDIR"
+            ICON_SOURCE_DESC="AppImage Internal (.DirIcon)"
+        else
+            local ICON_CANDIDATE
+            ICON_CANDIDATE=$(find "$APP_DIR" -type f \( -iname "*${BASE_WORD}*.svg" -o -iname "*${BASE_WORD}*.png" -o -iname "*icon*.svg" -o -iname "*icon*.png" -o -iname "*logo*.png" -o -iname "code.png" -o -iname "discord.png" \) \
+                ! -path "*/node_modules/*" -print -quit 2>/dev/null || true)
+
+            if [ -n "$ICON_CANDIDATE" ] && is_valid_image "$ICON_CANDIDATE"; then
+                normalize_and_copy_icon "$ICON_CANDIDATE" "$WORKDIR"
+                local REL_ICON="${ICON_CANDIDATE#$APP_DIR/}"
+                ICON_SOURCE_DESC="Extracted from package (${REL_ICON})"
+            else
+                local found_web_svg=0
+                if [ "$IS_LOCAL_SOURCE" -eq 0 ] && [ -n "$DOMAIN" ]; then
+                    for scan_u in "$PAGE_URL" "${BASE_URL}/press" "${BASE_URL}"; do
+                        local p_html
+                        p_html=$(fetch_page "$scan_u")
+                        local web_svgs
+                        web_svgs=$(printf '%s\n' "$p_html" | grep -oE '(https?://[^"'\'' <>]+|/[^"'\'' <>]+)(icon|logo|brand)[^"'\'' <>]*\.svg' \
+                            | grep -ivE 'sprite' \
+                            | sed "s|^/|${BASE_URL}/|" | sort -u || true)
+                        for w_svg in $web_svgs; do
+                            if curl -fsSL --max-time 5 -A "$USER_AGENT" "$w_svg" -o "$WORKDIR/downloaded_web_svg.svg" 2>/dev/null && is_valid_image "$WORKDIR/downloaded_web_svg.svg"; then
+                                normalize_and_copy_icon "$WORKDIR/downloaded_web_svg.svg" "$WORKDIR"
+                                rm -f "$WORKDIR/downloaded_web_svg.svg"
+                                ICON_SOURCE_DESC="Official Brand SVG (${w_svg})"
+                                found_web_svg=1
+                                break 2
+                            fi
+                        done
+                    done
+                fi
+
+                if [ "$found_web_svg" -eq 0 ]; then
+                    if [ "$IS_LOCAL_SOURCE" -eq 0 ] && curl -fsSL --max-time 5 "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/svg/${BASE_WORD}.svg" -o "$WORKDIR/cdn_icon.svg" 2>/dev/null && is_valid_image "$WORKDIR/cdn_icon.svg"; then
+                        normalize_and_copy_icon "$WORKDIR/cdn_icon.svg" "$WORKDIR"
+                        rm -f "$WORKDIR/cdn_icon.svg"
+                        ICON_SOURCE_DESC="Dashboard Icons CDN (${BASE_WORD}.svg)"
+                    elif [ "$IS_LOCAL_SOURCE" -eq 0 ] && curl -fsSL --max-time 5 "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/${BASE_WORD}.png" -o "$WORKDIR/cdn_icon.png" 2>/dev/null && is_valid_image "$WORKDIR/cdn_icon.png"; then
+                        normalize_and_copy_icon "$WORKDIR/cdn_icon.png" "$WORKDIR"
+                        rm -f "$WORKDIR/cdn_icon.png"
+                        ICON_SOURCE_DESC="Dashboard Icons CDN (${BASE_WORD}.png)"
+                    elif [ "$IS_LOCAL_SOURCE" -eq 0 ] && [ -n "$DOMAIN" ] && curl -fsSL --max-time 5 "https://www.google.com/s2/favicons?domain=${DOMAIN}&sz=256" -o "$WORKDIR/favicon.png" 2>/dev/null && is_valid_image "$WORKDIR/favicon.png"; then
+                        normalize_and_copy_icon "$WORKDIR/favicon.png" "$WORKDIR"
+                        rm -f "$WORKDIR/favicon.png"
+                        ICON_SOURCE_DESC="Official Domain Favicon (${DOMAIN} 256x256)"
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    local PRETTY_NAME
+    if [ -n "$SAVED_PRETTY" ]; then
+        PRETTY_NAME="$SAVED_PRETTY"
+    elif [ -n "$HARVESTED_NAME" ]; then
+        PRETTY_NAME="$HARVESTED_NAME"
+    else
+        PRETTY_NAME=$(echo "${PKGNAME//-/ }" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)} 1')
+    fi
+
+    local STARTUP_WM_CLASS
+    if [ -n "$HARVESTED_WMCLASS" ]; then
+        STARTUP_WM_CLASS="$HARVESTED_WMCLASS"
+    else
+        STARTUP_WM_CLASS="${PRETTY_NAME}"
+    fi
+
+    # Omarchy-Style Interactive Summary & Configuration Screen
+    if [ "$AUTO_INSTALL" = "yes" ]; then
+        while true; do
+            local ICON_INSTALL_PATH="None"
+            local TEMP_ICON_FILE="$WORKDIR/app_icon.${ICON_EXT}"
+            [ -f "$TEMP_ICON_FILE" ] && ICON_INSTALL_PATH="/usr/share/pixmaps/${PKGNAME}.${ICON_EXT}"
+
+            local CONFLICT_WARN=""
+            local existing_line
+            existing_line=$(grep -i "^${PKGNAME}|" "$SOURCES_FILE" 2>/dev/null || true)
+            if [ -n "$existing_line" ]; then
+                local existing_orig
+                existing_orig=$(printf '%s\n' "$existing_line" | cut -d'|' -f3)
+                if [ -n "$existing_orig" ] && [ "$existing_orig" != "$ORIG_SLUG" ]; then
+                    CONFLICT_WARN="Conflict: '${PKGNAME}-bin' is already used by '${existing_orig}'!"
+                fi
+            fi
+
+            render_header "Let's configure and install ${PRETTY_NAME}..."
+
+            render_table \
+                "Desktop App Name" "${PRETTY_NAME}" \
+                "Pacman Package" "${PKGNAME}-bin (v${PKGVER}) [${ARCH_TAG}]" \
+                "Package Format" "${FORMAT_LABEL}" \
+                "Install Directory" "${APP_BASE_DIR}/${PKGNAME}" \
+                "Main Executable" "${APP_BASE_DIR}/${PKGNAME}/${REL_BIN}" \
+                "Terminal Command" "/usr/bin/${PKGNAME}" \
+                "Desktop Launcher" "/usr/share/applications/${PKGNAME}.desktop" \
+                "StartupWMClass" "${STARTUP_WM_CLASS}" \
+                "Icon Install Path" "${ICON_INSTALL_PATH}" \
+                "Icon Source" "${ICON_SOURCE_DESC}" \
+                "Target Repository" "[${REPO_NAME}] (${REPO_DIR})"
+
+            if [ -n "$CONFLICT_WARN" ]; then
+                echo -e "  ${C_RED}${C_BOLD}WARNING:${C_RESET} ${C_RED}${CONFLICT_WARN} Please select [Change Name].${C_RESET}"
+                echo ""
+            fi
+
+            render_terminal_icon_preview "$TEMP_ICON_FILE"
+
+            prompt_buttons \
+                "Does this package configuration look right?" \
+                "i Install • n Change Name • c Change Icon • q Cancel" \
+                "Install" "Change Name" "Change Icon" "Cancel"
+
+            case "$SELECTED_INDEX" in
+                0)
+                    if [ -n "$CONFLICT_WARN" ]; then
+                        echo -e "  ${C_RED}==> Cannot proceed: Name conflict detected! Select [Change Name] first.${C_RESET}"
+                        sleep 2
+                        continue
+                    fi
+                    break
+                    ;;
+                1)
+                    edit_app_name_realtime "$PRETTY_NAME" "$PKGNAME"
+                    PRETTY_NAME="$NEW_PRETTY_NAME"
+                    PKGNAME="$NEW_PKGNAME"
+                    ;;
+                2)
+                    echo -e "  ${C_CYAN}::${C_RESET} Enter Icon URL, local path, or drag-and-drop (.svg/.png/.ico/.webp):"
+                    read -e -rp "  > " USER_ICON_INPUT < /dev/tty || true
+                    if [ -n "$USER_ICON_INPUT" ]; then
+                        apply_custom_icon "$USER_ICON_INPUT" "$WORKDIR" || true
+                    fi
+                    ;;
+                3)
+                    echo -e "  ${C_YELLOW}==> Installation aborted by user.${C_RESET}"
+                    sleep 1.2
+                    popd >/dev/null
+                    return 2
+                    ;;
+            esac
+        done
+    fi
+
+    local DESKTOP_ICON_VALUE="${PKGNAME}"
+    if [ -f "$WORKDIR/app_icon.${ICON_EXT}" ]; then
+        DESKTOP_ICON_VALUE="/usr/share/pixmaps/${PKGNAME}.${ICON_EXT}"
+    fi
+
+    local CATEGORIES_VALUE="${HARVESTED_CATEGORIES:-Utility;Development;}"
+    [[ "$CATEGORIES_VALUE" == *";" ]] || CATEGORIES_VALUE="${CATEGORIES_VALUE};"
+    local COMMENT_VALUE="${HARVESTED_COMMENT:-${PRETTY_NAME} application}"
+
+    printf '%s\n' \
+        "[Desktop Entry]" \
+        "Name=${PRETTY_NAME}" \
+        "Comment=${COMMENT_VALUE}" \
+        "Exec=\"${APP_BASE_DIR}/${PKGNAME}/${REL_BIN}\" %U" \
+        "Terminal=false" \
+        "Type=Application" \
+        "Icon=${DESKTOP_ICON_VALUE}" \
+        "StartupWMClass=${STARTUP_WM_CLASS}" \
+        "Categories=${CATEGORIES_VALUE}" \
+        > "$WORKDIR/${PKGNAME}.desktop"
+
+    printf '%s\n' \
+        "pkgname=${PKGNAME}-bin" \
+        "pkgver=${PKGVER}" \
+        "pkgrel=1" \
+        "pkgdesc=\"${PRETTY_NAME} (Managed by ${CMD_NAME} in [${REPO_NAME}])\"" \
+        "arch=('x86_64' 'aarch64')" \
+        "url=\"${PAGE_URL}\"" \
+        "license=('custom')" \
+        "options=('!strip' '!debug')" \
+        "" \
+        "package() {" \
+        "    install -dm755 \"\$pkgdir${APP_BASE_DIR}/${PKGNAME}\"" \
+        "    cp -a \"${WORKDIR}/${APP_DIR}/.\" \"\$pkgdir${APP_BASE_DIR}/${PKGNAME}/\"" \
+        "    chmod -R u+w,go+rX \"\$pkgdir${APP_BASE_DIR}/${PKGNAME}\"" \
+        "    if [ -n \"${REL_BIN}\" ] && [ -e \"\$pkgdir${APP_BASE_DIR}/${PKGNAME}/${REL_BIN}\" ]; then" \
+        "        chmod +x \"\$pkgdir${APP_BASE_DIR}/${PKGNAME}/${REL_BIN}\"" \
+        "    fi" \
+        "" \
+        "    if [ -f \"\$pkgdir${APP_BASE_DIR}/${PKGNAME}/chrome-sandbox\" ]; then" \
+        "        chmod 4755 \"\$pkgdir${APP_BASE_DIR}/${PKGNAME}/chrome-sandbox\"" \
+        "    fi" \
+        "" \
+        "    install -dm755 \"\$pkgdir/usr/bin\"" \
+        "    ln -sf \"${APP_BASE_DIR}/${PKGNAME}/${REL_BIN}\" \"\$pkgdir/usr/bin/${PKGNAME}\"" \
+        "" \
+        "    install -Dm644 \"${WORKDIR}/${PKGNAME}.desktop\" \"\$pkgdir/usr/share/applications/${PKGNAME}.desktop\"" \
+        "    if [ -f \"${WORKDIR}/app_icon.svg\" ]; then" \
+        "        install -Dm644 \"${WORKDIR}/app_icon.svg\" \"\$pkgdir/usr/share/pixmaps/${PKGNAME}.svg\"" \
+        "        install -Dm644 \"${WORKDIR}/app_icon.svg\" \"\$pkgdir/usr/share/icons/hicolor/scalable/apps/${PKGNAME}.svg\"" \
+        "    elif [ -f \"${WORKDIR}/app_icon.png\" ]; then" \
+        "        install -Dm644 \"${WORKDIR}/app_icon.png\" \"\$pkgdir/usr/share/pixmaps/${PKGNAME}.png\"" \
+        "        install -Dm644 \"${WORKDIR}/app_icon.png\" \"\$pkgdir/usr/share/icons/hicolor/256x256/apps/${PKGNAME}.png\"" \
+        "    fi" \
+        "}" \
+        > "$WORKDIR/PKGBUILD"
+
+    echo -e "  ${C_BLUE}::${C_RESET} Building package ${C_BOLD}${PKGNAME}-bin v${PKGVER}${C_RESET}..."
+    PKGEXT='.pkg.tar.zst' makepkg -f --noconfirm
+
+    echo -e "  ${C_BLUE}::${C_RESET} Updating local repository [${REPO_NAME}]..."
+    rm -f "$REPO_DIR/${PKGNAME}-bin-"*.pkg.tar.zst*
+    cp ./*.pkg.tar.zst "$REPO_DIR/"
+    repo-add -R "$REPO_DB" "$REPO_DIR/${PKGNAME}-bin-"*.pkg.tar.zst >/dev/null
+
+    popd >/dev/null
+
+    sed -i "/^${PKGNAME}|/d" "$SOURCES_FILE"
+    echo "${PKGNAME}|${PAGE_URL}|${ORIG_SLUG}|${PRETTY_NAME}|${CUSTOM_ICON_REF}|${PKG_FORMAT}" >> "$SOURCES_FILE"
+    echo -e "  ==> [${C_BOLD}${PKGNAME}-bin${C_RESET}] Registered in $SOURCES_FILE"
+
+    if [ "$AUTO_INSTALL" = "yes" ]; then
+        echo -e "  ${C_BLUE}::${C_RESET} Installing ${C_BOLD}${PKGNAME}-bin${C_RESET} via Pacman..."
+        sudo rm -f "/var/cache/pacman/pkg/${PKGNAME}-bin-"*.pkg.tar.zst* 2>/dev/null || true
+        sudo pacman -Sy "${PKGNAME}-bin"
+        sudo update-desktop-database /usr/share/applications 2>/dev/null || true
+        sudo gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+    fi
+}
+
+# ==============================================================================
+# MODE 4: Package Selector TUI
+# ==============================================================================
+handle_url_input() {
+    local raw_input="$1"
+    local sanitized
+    sanitized=$(sanitize_input_path "$raw_input")
+    [ -z "$sanitized" ] && return 1
+
+    # Check if input is a local file (dragged-and-dropped or local path)
+    if [ -f "$sanitized" ]; then
+        local l_fmt
+        l_fmt=$(detect_pkg_format "$sanitized")
+        if [[ "$l_fmt" =~ (AppImage|tar\.(gz|xz|zst|bz2)|tgz|txz|tbz2) ]] || [[ "$sanitized" =~ \.(AppImage|appimage|tar\.gz|tgz|tar\.xz|txz|tar\.zst|tar\.bz2|tbz2)$ ]]; then
+            build_and_install_single "$sanitized" "file://${sanitized}" "" "yes"
+            return $?
+        else
+            echo -e "  ${C_RED}Error: Local file is not a supported package format (.AppImage or .tar.*)${C_RESET}" >&2
+            return 1
+        fi
+    fi
+
+    local INPUT_URL="$sanitized"
+    render_header "Scanning remote source for Linux packages (.tar.* / .AppImage)..."
+
+    local ALL_URLS
+    if ! ALL_URLS=$(resolve_all_tar_urls "$INPUT_URL"); then
+        echo ""
+        echo -e "  ${C_RED}Error: No reachable Linux packages found at $INPUT_URL${C_RESET}" >&2
+        echo -e "  ${C_DIM}Tip: Pass a direct download link, local path, or drag-and-drop a file.${C_RESET}" >&2
+        return 1
+    fi
+
+    local tmp_urls
+    tmp_urls=$(mktemp "/tmp/${CMD_NAME}-urls-XXXXXX")
+    printf '%s\n' "$ALL_URLS" > "$tmp_urls"
+    local -a RAW_ARRAY=()
+    mapfile -t RAW_ARRAY < "$tmp_urls"
+    rm -f "$tmp_urls"
+
+    local X86_LIST=()
+    local OTHER_LIST=()
+    for item in "${RAW_ARRAY[@]}"; do
+        [ -z "$item" ] && continue
+        if [[ "$(detect_arch_label "$item")" == "x86_64" ]]; then
+            X86_LIST+=("$item")
+        else
+            OTHER_LIST+=("$item")
+        fi
+    done
+
+    local URL_ARRAY=("${X86_LIST[@]}" "${OTHER_LIST[@]}")
+    local COUNT="${#URL_ARRAY[@]}"
+
+    if [ "$COUNT" -eq 1 ]; then
+        local res=0
+        build_and_install_single "${URL_ARRAY[0]}" "$INPUT_URL" "" "yes" || res=$?
+        return "$res"
+    fi
+
+    while true; do
+        render_header "Detected ${COUNT} verified Linux packages (.tar.* / .AppImage)..."
+
+        local -a table_args=()
+        local i=1
+        for u in "${URL_ARRAY[@]}"; do
+            local name ver ver_str arch_lbl fmt badge
+            name=$(clean_pkgname "$u")
+            ver=$(printf '%s\n' "$u" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | sed -n '1p' || true)
+            [ -n "$ver" ] && ver_str="v${ver}" || ver_str="latest"
+            arch_lbl=$(detect_arch_label "$u")
+            fmt=$(detect_pkg_format "$u")
+            badge=$(format_badge "$fmt")
+            table_args+=("[$i] ${name}-bin" "${ver_str} [${arch_lbl}] ${badge} - ${u:0:44}...")
+            i=$((i + 1))
+        done
+
+        render_table "${table_args[@]}"
+
+        read -rp "  ==> Select package number [1-$COUNT] (Default: 1) or [Q] to abort: " CHOICE < /dev/tty || true
+
+        local selected_idx=-1
+        case "${CHOICE^^}" in
+            "")
+                selected_idx=0
+                ;;
+            Q)
+                echo -e "  ${C_YELLOW}==> Installation aborted by user.${C_RESET}"
+                sleep 1.2
+                return 0
+                ;;
+            *)
+                if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -ge 1 ] && [ "$CHOICE" -le "$COUNT" ]; then
+                    selected_idx=$((CHOICE - 1))
+                else
+                    echo -e "  ${C_RED}==> Invalid selection. Please enter 1-${COUNT} or Q.${C_RESET}"
+                    sleep 1
+                    continue
+                fi
+                ;;
+        esac
+
+        if [ "$selected_idx" -ge 0 ]; then
+            local res=0
+            build_and_install_single "${URL_ARRAY[$selected_idx]}" "$INPUT_URL" "" "yes" || res=$?
+            # If user clicked Cancel on the configuration screen (res=2), loop back to package selection
+            if [ "$res" -eq 2 ]; then
+                continue
+            fi
+            return "$res"
+        fi
+    done
+}
+
+# ==============================================================================
+# Helper Routines: Updates & Tracked Applications
+# ==============================================================================
+sync_all_updates() {
+    if [ -s "$SOURCES_FILE" ]; then
+        render_header "Synchronizing external packages in [${REPO_NAME}]..."
+        echo -e "  ${C_CYAN}::${C_RESET} Checking all tracked applications in parallel..."
+
+        local tmp_sync_dir
+        tmp_sync_dir=$(mktemp -d "/tmp/${CMD_NAME}-sync-XXXXXX")
+        local idx=0
+        local -a app_records=()
+
+        # Phase 1: Parallel asynchronous resolution of remote release URLs
+        while IFS='|' read -r saved_name page_url orig_slug saved_pretty saved_icon saved_fmt || [ -n "$saved_name" ]; do
+            [[ -z "$saved_name" || "$saved_name" =~ ^[[:space:]]*# ]] && continue
+            [ -z "$page_url" ] && continue
+            if [[ "$page_url" =~ ^(file|local):// ]]; then
+                echo -e "  ${C_DIM}   [${saved_pretty:-$saved_name}] Installed from local file - skipping remote check.${C_RESET}"
+                continue
+            fi
+            idx=$((idx + 1))
+            app_records+=("${idx}|${saved_name}|${page_url}|${orig_slug}|${saved_pretty:-$saved_name}|${saved_icon:-}|${saved_fmt:-}")
+
+            (
+                local res_urls
+                res_urls=$(resolve_all_tar_urls "$page_url" 2>/dev/null || true)
+                printf '%s\n' "$res_urls" > "${tmp_sync_dir}/${idx}.urls"
+            ) &
+        done < "$SOURCES_FILE"
+
+        # Wait for all concurrent web checks to complete simultaneously
+        wait
+
+        # Phase 2: Sequential verification & build (guarantees zero repo-add lock collisions)
+        local record
+        for record in "${app_records[@]}"; do
+            IFS='|' read -r r_idx s_name p_url o_slug s_pretty s_icon s_fmt <<< "$record"
+            local target_match="${o_slug:-$s_name}"
+            local url_file="${tmp_sync_dir}/${r_idx}.urls"
+
+            if [ ! -s "$url_file" ]; then
+                echo -e "  ${C_DIM}   No reachable release archives found for ${s_pretty}.${C_RESET}"
+                continue
+            fi
+
+            while IFS= read -r tar_url; do
+                [ -z "$tar_url" ] && continue
+                local detected_name arch_t
+                detected_name=$(clean_pkgname "$tar_url")
+                arch_t=$(detect_arch_label "$tar_url")
+                if [[ "$arch_t" != "x86_64" && ! "$detected_name" =~ $arch_t$ ]]; then
+                    detected_name="${detected_name}-${arch_t}"
+                fi
+                if [ "$detected_name" = "$target_match" ] || [ "$detected_name" = "$s_name" ] || [[ "$p_url" =~ \.(tar\.gz|tgz|tar\.xz|txz|tar\.bz2|tbz2|tar\.zst|AppImage)$ ]]; then
+                    build_and_install_single "$tar_url" "$p_url" "$s_name" "no" "${s_pretty}" "${s_icon}" || true
+                fi
+            done < "$url_file"
+        done
+
+        rm -rf "$tmp_sync_dir"
+        echo ""
+        echo -e "  ${C_GREEN}✓ Repository synchronization finished.${C_RESET}"
+        echo ""
+    else
+        render_header "Synchronizing external packages in [${REPO_NAME}]..."
+        echo -e "  ${C_DIM}No applications are currently tracked in [${REPO_NAME}].${C_RESET}"
+        echo ""
+    fi
+}
+
+list_tracked_apps() {
+    render_header "Tracked applications in [${REPO_NAME}] (${REPO_DIR})"
+    if [ -s "$SOURCES_FILE" ]; then
+        local -a local_args=()
+        while IFS='|' read -r s_name s_url _ s_pretty _ s_fmt || [ -n "$s_name" ]; do
+            [[ -z "$s_name" || "$s_name" =~ ^[[:space:]]*# ]] && continue
+            local fmt="${s_fmt:-}"
+            if [ -z "$fmt" ]; then
+                fmt=$(detect_pkg_format "$s_url")
+            fi
+            local badge
+            badge=$(format_badge "$fmt")
+            local src_tag=""
+            if [[ "$s_url" =~ ^(file|local):// ]]; then
+                src_tag=" [Local]"
+            fi
+            local_args+=("${s_pretty:-$s_name} (${s_name}-bin)" "${badge}${src_tag} ${s_url}")
+        done < "$SOURCES_FILE"
+        if [ "${#local_args[@]}" -gt 0 ]; then
+            render_table "${local_args[@]}"
+        else
+            echo -e "  ${C_DIM}No applications are currently tracked in [${REPO_NAME}].${C_RESET}"
+            echo ""
+        fi
+    else
+        echo -e "  ${C_DIM}No applications are currently tracked in [${REPO_NAME}].${C_RESET}"
+        echo ""
+    fi
+}
+
+# ==============================================================================
+# Interactive Entrypoint (Executed when pkgapps runs with no arguments)
+# ==============================================================================
+interactive_entrypoint() {
+    while true; do
+        render_header "Interactive Package Manager & Installer"
+        echo -e "  ${C_CYAN}::${C_RESET} Enter an application website, download page, package archive, or drag-and-drop a file:"
+        echo -e "  ${C_DIM}(Supports .tar.gz, .tar.xz, .tar.zst, .tar.bz2, .AppImage • Enter for Action Menu • 'q' to quit)${C_RESET}"
+        echo ""
+        local input_url=""
+        read -e -rp "  URL / File: " input_url < /dev/tty || true
+        input_url="$(printf '%s' "$input_url" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+        if [[ "$input_url" == "q" || "$input_url" == "Q" || "$input_url" == "exit" ]]; then
+            echo ""
+            exit 0
+        fi
+
+        if [ -n "$input_url" ]; then
+            local res=0
+            handle_url_input "$input_url" || res=$?
+            if [ "$res" -eq 2 ] || [ "$res" -eq 0 ]; then
+                sleep 1.2
+            else
+                echo ""
+                read -rsn1 -p "  Press any key to return to menu..." < /dev/tty 2>/dev/null || true
+            fi
+            continue
+        fi
+
+        # User pressed Enter without text -> Action Menu
+        render_header "Choose an action to perform..."
+        prompt_buttons \
+            "What would you like to do?" \
+            "i Install from URL / File • u Update Apps • l List Apps • h Help • q Quit" \
+            "Install from URL / File" "Update All Apps" "List Tracked Apps" "Help Guide" "Quit"
+
+        case "$SELECTED_INDEX" in
+            0)
+                # Loop back to prompt for URL
+                continue
+                ;;
+            1)
+                sync_all_updates
+                echo ""
+                read -rsn1 -p "  Press any key to return to menu..." < /dev/tty 2>/dev/null || true
+                ;;
+            2)
+                list_tracked_apps
+                echo ""
+                read -rsn1 -p "  Press any key to return to menu..." < /dev/tty 2>/dev/null || true
+                ;;
+            3)
+                show_help
+                echo ""
+                read -rsn1 -p "  Press any key to return to menu..." < /dev/tty 2>/dev/null || true
+                ;;
+            4)
+                echo ""
+                exit 0
+                ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# CLI Router
+# ==============================================================================
+case "${1:-}" in
+    --help|-h)
+        show_help
+        ;;
+    --init|-i)
+        init_environment
+        ;;
+    --update|-u)
+        sync_all_updates
+        ;;
+    --list|-l)
+        list_tracked_apps
+        ;;
+    --hook-remove)
+        while IFS= read -r pkg; do
+            [ -z "$pkg" ] && continue
+            APP="${pkg%-bin}"
+            # Verify package is genuinely uninstalled and tracked by pkgapps
+            if ! pacman -Qi "${APP}-bin" &>/dev/null && grep -q "^${APP}|" "$SOURCES_FILE"; then
+                sed -i "/^${APP}|/d" "$SOURCES_FILE"
+                repo-remove "$REPO_DB" "${APP}-bin" >/dev/null 2>&1 || true
+                rm -f "$REPO_DIR/${APP}-bin-"*.pkg.tar.zst*
+                echo "==> [$REPO_NAME] ${APP}-bin removed from local repository and update tracker."
+            fi
+        done
+        ;;
+    --remove|-r)
+        APP="${2:-}"
+        [ -z "$APP" ] && { echo "Usage: $CMD_NAME -r [name] (Run '$CMD_NAME -h' for help)"; exit 1; }
+        APP="${APP%-bin}"
+        render_header "Removing ${APP}-bin from system and [${REPO_NAME}]..."
+
+        local APP_PRETTY="$APP"
+        if [ -f "$SOURCES_FILE" ]; then
+            local line
+            line=$(grep -i "^${APP}|" "$SOURCES_FILE" 2>/dev/null || true)
+            if [ -n "$line" ]; then
+                local p_field
+                p_field=$(printf '%s\n' "$line" | cut -d'|' -f4)
+                [ -n "$p_field" ] && APP_PRETTY="$p_field"
+            fi
+        fi
+
+        echo -e "  ${C_SUBTEXT}How would you like to handle user data for ${APP_PRETTY}?${C_RESET}"
+        echo -e "    ${C_CYAN}[1] Keep User Data & Sessions${C_RESET}     ${C_DIM}(Removes package/binaries; preserves ~/.config, caches & sessions)${C_RESET}"
+        echo -e "    ${C_RED}[2] Wipe All Data — Factory Reset${C_RESET} ${C_DIM}(Permanently erases all configs, active sessions, and caches)${C_RESET}"
+        echo ""
+        prompt_buttons \
+            "Choose an uninstallation data mode:" \
+            "k Keep Data • w Wipe All (Factory Reset) • c Cancel" \
+            "Keep User Data & Sessions" "Wipe All Data — Factory Reset" "Cancel / Abort"
+
+        local do_purge=0
+        case "$SELECTED_INDEX" in
+            0)
+                do_purge=0
+                ;;
+            1)
+                render_header "WARNING: Factory Reset Confirmation for ${APP_PRETTY}"
+                echo -e "  ${C_RED}${C_BOLD}WARNING: ALL USER DATA WILL BE PERMANENTLY ERASED!${C_RESET}"
+                echo -e "  ${C_TEXT}This will erase all login sessions, settings, caches, and states for ${APP_PRETTY} across:${C_RESET}"
+                echo -e "  ${C_RED}• ~/.config/${APP}${C_RESET}"
+                echo -e "  ${C_RED}• ~/.cache/${APP}${C_RESET}"
+                echo -e "  ${C_RED}• ~/.local/share/${APP}${C_RESET}"
+                echo -e "  ${C_RED}• ~/.local/state/${APP}${C_RESET}"
+                echo -e "  ${C_DIM}The system will be left as if ${APP_PRETTY} had NEVER been installed.${C_RESET}"
+                echo ""
+                prompt_buttons \
+                    "Are you absolutely sure you want to permanently wipe all user data?" \
+                    "w Yes, erase all • n No, cancel" \
+                    "Yes, Erase Everything" "No, Cancel"
+                if [ "$SELECTED_INDEX" -eq 0 ]; then
+                    do_purge=1
+                else
+                    echo -e "  ${C_YELLOW}==> Removal cancelled by user.${C_RESET}"
+                    exit 0
+                fi
+                ;;
+            2)
+                echo -e "  ${C_YELLOW}==> Removal cancelled by user.${C_RESET}"
+                exit 0
+                ;;
+        esac
+
+        if pacman -Qi "${APP}-bin" &>/dev/null; then
+            sudo pacman -Rns "${APP}-bin"
+        else
+            echo "${APP}-bin" | "$SCRIPT_PATH" --hook-remove
+        fi
+        sudo rm -rf "${APP_BASE_DIR}/${APP}" 2>/dev/null || true
+
+        if [ "$do_purge" -eq 1 ]; then
+            purge_app_user_data "$APP" "$APP_PRETTY"
+        fi
+        ;;
+    *)
+        if [ $# -lt 1 ]; then
+            interactive_entrypoint
+            exit 0
+        fi
+        handle_url_input "$1"
+        ;;
+esac
