@@ -223,19 +223,22 @@ prompt_buttons() {
                 l) cur=$(( (cur + 1) % count )) ;;
                 h) cur=$(( (cur - 1 + count) % count )) ;;
                 k)
-                    if [[ "${btns[0],,}" == k* ]]; then
+                    if [[ "${btns[0],,}" == *keep* ]] || [[ "${btns[0],,}" == k* ]]; then
                         SELECTED_INDEX=0
                         break
                     fi
                     ;;
                 w)
-                    if [ "$count" -ge 2 ] && [[ "${btns[1],,}" == w* ]]; then
+                    if [ "$count" -ge 2 ] && { [[ "${btns[1],,}" == *wipe* ]] || [[ "${btns[1],,}" == w* ]]; }; then
                         SELECTED_INDEX=1
+                        break
+                    elif [[ "${btns[0],,}" == *erase* ]] || [[ "${btns[0],,}" == *wipe* ]] || [[ "${btns[0],,}" == *yes* ]]; then
+                        SELECTED_INDEX=0
                         break
                     fi
                     ;;
                 y)
-                    if [[ "${btns[0],,}" == y* ]]; then
+                    if [[ "${btns[0],,}" == y* ]] || [[ "${btns[0],,}" == *yes* ]]; then
                         SELECTED_INDEX=0
                         break
                     fi
@@ -247,7 +250,7 @@ prompt_buttons() {
                     fi
                     ;;
                 n)
-                    if [ "$count" -ge 2 ] && [[ "${btns[1],,}" == n* ]]; then
+                    if [ "$count" -ge 2 ] && { [[ "${btns[1],,}" == n* ]] || [[ "${btns[1],,}" == *no* ]]; }; then
                         SELECTED_INDEX=1
                         break
                     fi
@@ -256,13 +259,25 @@ prompt_buttons() {
                     if [ "$count" -ge 3 ] && [[ "${btns[2],,}" == b* ]]; then
                         SELECTED_INDEX=2
                         break
+                    elif [ "$count" -ge 2 ] && [[ "${btns[1],,}" == *back* ]]; then
+                        SELECTED_INDEX=1
+                        break
                     fi
                     ;;
                 c)
-                    if [ "$count" -ge 3 ] && [[ "${btns[2],,}" == c* ]]; then
+                    if [ "$count" -ge 5 ] && [[ "${btns[4],,}" == c* ]]; then
+                        SELECTED_INDEX=4
+                        break
+                    elif [ "$count" -ge 3 ] && [[ "${btns[2],,}" == c* ]]; then
                         SELECTED_INDEX=2
                         break
                     elif [[ "${btns[0],,}" == c* ]]; then
+                        SELECTED_INDEX=0
+                        break
+                    fi
+                    ;;
+                u)
+                    if [[ "${btns[0],,}" == u* ]]; then
                         SELECTED_INDEX=0
                         break
                     fi
@@ -282,8 +297,8 @@ prompt_buttons() {
                         break
                     fi
                     ;;
-                d|u)
-                    if [ "$count" -ge 4 ]; then
+                d)
+                    if [ "$count" -ge 4 ] && [[ "${btns[3],,}" == d* ]]; then
                         SELECTED_INDEX=3
                         break
                     fi
@@ -408,7 +423,11 @@ customize_settings_interactive() {
 # Core Actions: Install, Migrate, Clean & Uninstall
 # ==============================================================================
 ensure_sudo_tty() {
-    sudo -v < /dev/tty
+    if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        sudo -v < /dev/tty 2>/dev/null || sudo -v || true
+    else
+        sudo -v 2>/dev/null || true
+    fi
 }
 
 write_global_conf() {
@@ -609,57 +628,150 @@ configure_shells_and_omarchy() {
     fi
 }
 
+PURGE_MODE=""
+
 purge_app_user_data() {
     local app_slug="$1"
     local app_pretty="${2:-}"
+    local orig_slug="${3:-}"
     [ -z "$app_slug" ] && return 0
 
     case "${app_slug,,}" in
-        ""|"."|".."|"root"|"home"|"config"|"cache"|"local"|"share"|"state"|"bin"|"lib"|"etc")
+        ""|"."|".."|"root"|"home"|"config"|"cache"|"local"|"share"|"state"|"bin"|"lib"|"etc"|"usr"|"var"|"tmp"|"opt"|"gemini"|".gemini"|"omarchy"|"hypr"|"hyprland")
             return 0
             ;;
     esac
 
-    local -a candidate_dirs=(
-        "${XDG_CONFIG_HOME:-$HOME/.config}/${app_slug}"
-        "${XDG_CACHE_HOME:-$HOME/.cache}/${app_slug}"
-        "${XDG_DATA_HOME:-$HOME/.local/share}/${app_slug}"
-        "${XDG_STATE_HOME:-$HOME/.local/state}/${app_slug}"
-    )
+    local -A seen_patterns=()
+    local -a patterns=()
 
-    if [ -n "$app_pretty" ] && [ "${app_pretty}" != "${app_slug}" ]; then
-        local stripped_pretty="${app_pretty// /}"
-        candidate_dirs+=(
-            "${XDG_CONFIG_HOME:-$HOME/.config}/${stripped_pretty}"
-            "${XDG_CACHE_HOME:-$HOME/.cache}/${stripped_pretty}"
-            "${XDG_DATA_HOME:-$HOME/.local/share}/${stripped_pretty}"
-            "${XDG_STATE_HOME:-$HOME/.local/state}/${stripped_pretty}"
-        )
+    add_pattern() {
+        local p="$1"
+        [ -z "$p" ] && return 0
+        local p_lower="${p,,}"
+        case "$p_lower" in
+            ""|"."|".."|"root"|"home"|"config"|"cache"|"local"|"share"|"state"|"bin"|"lib"|"etc"|"usr"|"var"|"tmp"|"opt"|"gemini"|".gemini"|"omarchy"|"hypr"|"hyprland")
+                return 0
+                ;;
+        esac
+        [ ${#p} -lt 2 ] && return 0
+        if [ -z "${seen_patterns[$p]:-}" ]; then
+            seen_patterns["$p"]=1
+            patterns+=("$p")
+        fi
+    }
+
+    add_pattern "$app_slug"
+    [ -n "$orig_slug" ] && add_pattern "$orig_slug"
+
+    if [ -n "$app_pretty" ]; then
+        add_pattern "$app_pretty"
+        add_pattern "${app_pretty// /}"
+        add_pattern "${app_pretty// /-}"
+        add_pattern "${app_pretty// /_}"
     fi
 
-    local dir
-    for dir in "${candidate_dirs[@]}"; do
-        if [[ "$dir" =~ ^${HOME}/(\.config|\.cache|\.local/share|\.local/state)/.+ ]] && [ -d "$dir" ]; then
-            echo -e "  ${C_YELLOW}::${C_RESET} Purging user data: ${C_DIM}${dir}${C_RESET}"
-            rm -rf "$dir"
+    if [[ "$app_slug" =~ - ]]; then
+        add_pattern "${app_slug//-/ }"
+        add_pattern "${app_slug//-/_}"
+    fi
+
+    local base_word=""
+    if [[ "$app_slug" =~ ^([a-zA-Z0-9_-]+)-(desktop|bin|app|gui|client|electron)$ ]]; then
+        base_word="${BASH_REMATCH[1]}"
+        if [ ${#base_word} -ge 3 ]; then
+            case "${base_word,,}" in
+                ""|"."|".."|"root"|"home"|"config"|"cache"|"local"|"share"|"state"|"bin"|"lib"|"etc"|"usr"|"var"|"tmp"|"opt"|"gemini"|".gemini"|"omarchy"|"hypr"|"hyprland")
+                    ;;
+                *)
+                    add_pattern "$base_word"
+                    ;;
+            esac
         fi
+    fi
+
+    [ ${#patterns[@]} -eq 0 ] && return 0
+
+    local -a find_args=()
+    local idx=0
+    for p in "${patterns[@]}"; do
+        if [ $idx -gt 0 ]; then
+            find_args+=("-o")
+        fi
+        find_args+=("-iname" "$p")
+        idx=$((idx + 1))
     done
+
+    local -a base_xdg_dirs=(
+        "${XDG_CONFIG_HOME:-$HOME/.config}"
+        "${XDG_CACHE_HOME:-$HOME/.cache}"
+        "${XDG_DATA_HOME:-$HOME/.local/share}"
+        "${XDG_STATE_HOME:-$HOME/.local/state}"
+    )
+
+    local base_dir
+    for base_dir in "${base_xdg_dirs[@]}"; do
+        [ -d "$base_dir" ] || continue
+        while IFS= read -r matched_path; do
+            [ -z "$matched_path" ] && continue
+            [ -d "$matched_path" ] || continue
+            local parent_dir="${matched_path%/*}"
+            [ "$parent_dir" = "$base_dir" ] || continue
+            local bname="${matched_path##*/}"
+            case "${bname,,}" in
+                ""|"."|".."|"root"|"home"|"config"|"cache"|"local"|"share"|"state"|"bin"|"lib"|"etc"|"usr"|"var"|"tmp"|"opt"|"gemini"|".gemini"|"omarchy"|"hypr"|"hyprland"|"applications"|"systemd"|"menus"|"mime"|"themes"|"icons"|"fonts")
+                    continue
+                    ;;
+            esac
+            echo -e "  ${C_YELLOW:-}::${C_RESET:-} Purging user data: ${C_DIM:-}${matched_path}${C_RESET:-}"
+            rm -rf "$matched_path"
+        done < <(find "$base_dir" -maxdepth 1 -mindepth 1 -type d \( "${find_args[@]}" \) 2>/dev/null || true)
+    done
+
+    local -a home_dot_args=()
+    idx=0
+    for p in "${patterns[@]}"; do
+        if [ $idx -gt 0 ]; then
+            home_dot_args+=("-o")
+        fi
+        home_dot_args+=("-iname" ".$p")
+        idx=$((idx + 1))
+    done
+
+    while IFS= read -r matched_path; do
+        [ -z "$matched_path" ] && continue
+        [ -d "$matched_path" ] || continue
+        local parent_dir="${matched_path%/*}"
+        [ "$parent_dir" = "$HOME" ] || continue
+        local bname="${matched_path##*/}"
+        case "${bname,,}" in
+            ""|"."|".."|".config"|".cache"|".local"|".gemini"|".ssh"|".gnupg"|".pki"|".npm"|".nv"|".agents"|".codex"|".claude"|".hermes"|".pi"|".bash*"|".git*"|".profile"|".bashrc")
+                continue
+                ;;
+        esac
+        echo -e "  ${C_YELLOW:-}::${C_RESET:-} Purging user data: ${C_DIM:-}${matched_path}${C_RESET:-}"
+        rm -rf "$matched_path"
+    done < <(find "$HOME" -maxdepth 1 -mindepth 1 -type d \( "${home_dot_args[@]}" \) 2>/dev/null || true)
 }
 
 prompt_factory_reset_choice() {
     local context_title="$1"
+    PURGE_MODE="cancel"
     render_header "$context_title"
     echo -e "  ${C_SUBTEXT}How would you like to handle application user data in your user profile?${C_RESET}"
-    echo -e "    ${C_CYAN}[1] Keep User Data & Sessions${C_RESET}     ${C_DIM}(Removes packages/binaries; keeps ~/.config, caches & sessions)${C_RESET}"
-    echo -e "    ${C_RED}[2] Wipe All Data — Factory Reset${C_RESET} ${C_DIM}(Permanently erases all configs, active sessions, and caches)${C_RESET}"
+    echo -e "    ${C_CYAN}[1] Uninstall Apps Only (Keep User Data)${C_RESET}"
+    echo -e "        ${C_DIM}(Removes packages/binaries; keeps ~/.config, caches & sessions)${C_RESET}"
+    echo -e "    ${C_RED}[2] Uninstall Apps + Wipe All Data (Factory Reset)${C_RESET}"
+    echo -e "        ${C_DIM}(Permanently erases all configs, active sessions, and caches)${C_RESET}"
     echo ""
     prompt_buttons \
         "Choose an uninstallation data mode:" \
         "k Keep Data • w Wipe All (Factory Reset) • c Cancel" \
-        "Keep User Data & Sessions" "Wipe All Data — Factory Reset" "Cancel / Abort"
+        "Uninstall Apps Only (Keep User Data)" "Uninstall Apps + Wipe All Data (Factory Reset)" "Cancel / Go Back"
 
     case "$SELECTED_INDEX" in
         0)
+            PURGE_MODE="keep"
             return 0
             ;;
         1)
@@ -677,12 +789,15 @@ prompt_factory_reset_choice() {
                 "w Yes, erase all • n No, go back" \
                 "Yes, Erase Everything" "No, Go Back"
             if [ "$SELECTED_INDEX" -eq 0 ]; then
-                return 1
+                PURGE_MODE="wipe"
+            else
+                PURGE_MODE="cancel"
             fi
-            return 2
+            return 0
             ;;
-        2)
-            return 2
+        2|*)
+            PURGE_MODE="cancel"
+            return 0
             ;;
     esac
 }
@@ -692,41 +807,121 @@ remove_all_installed_apps_and_repo() {
     local target_dir="$2"
     local target_app_base="$3"
     local purge_data="${4:-0}"
-    local sf="$HOME/.config/${target_repo}/sources.conf"
 
     ensure_sudo_tty
 
-    # Read all tracked apps into an in-memory array first to avoid loop corruption by pacman hooks
-    local -a app_entries=()
+    # Collect union of all tracked, repository, and installed apps:
+    # 1. Sources config file
+    # 2. Registered in local repo or .pkg.tar.zst in target_dir
+    # 3. Installed *-bin packages whose pacman -Qi description contains 'Managed by pkgapps'
+    declare -A detected_apps=()
+    declare -A detected_pretties=()
+    declare -A detected_origs=()
+
+    local sf="$HOME/.config/${target_repo}/sources.conf"
     if [ -f "$sf" ]; then
-        while IFS='|' read -r app_slug _url _orig app_pretty _rest || [ -n "$app_slug" ]; do
+        while IFS='|' read -r app_slug _url orig_slug app_pretty _rest || [ -n "$app_slug" ]; do
             [[ -z "$app_slug" || "$app_slug" =~ ^[[:space:]]*# ]] && continue
-            app_entries+=("${app_slug}|${app_pretty:-$app_slug}")
+            detected_apps["$app_slug"]=1
+            [ -n "$app_pretty" ] && detected_pretties["$app_slug"]="$app_pretty"
+            [ -n "$orig_slug" ] && detected_origs["$app_slug"]="$orig_slug"
         done < "$sf"
     fi
 
-    local entry
-    for entry in "${app_entries[@]}"; do
-        local app_slug="${entry%%|*}"
-        local app_pretty="${entry#*|}"
-        if pacman -Qi "${app_slug}-bin" &>/dev/null; then
-            echo -e "  ${C_YELLOW}::${C_RESET} Removing installed package ${C_BOLD}${app_slug}-bin${C_RESET}..."
-            sudo pacman -Rns --noconfirm "${app_slug}-bin" < /dev/tty 2>/dev/null || true
-        fi
-        sudo rm -rf "${target_app_base}/${app_slug}" < /dev/null 2>/dev/null || true
+    if command -v pacman &>/dev/null; then
+        local repo_pkg
+        while IFS= read -r repo_pkg; do
+            [ -z "$repo_pkg" ] && continue
+            local slug="${repo_pkg%-bin}"
+            detected_apps["$slug"]=1
+        done < <(pacman -Slq "$target_repo" 2>/dev/null || true)
+    fi
 
-        if [ "$purge_data" -eq 1 ]; then
-            purge_app_user_data "$app_slug" "$app_pretty"
+    if [ -d "$target_dir" ]; then
+        local pkg_file
+        for pkg_file in "$target_dir"/*.pkg.tar.zst; do
+            [ -e "$pkg_file" ] || continue
+            local pkg_name=""
+            if command -v pacman &>/dev/null; then
+                pkg_name="$(pacman -Qpq "$pkg_file" 2>/dev/null || true)"
+            fi
+            if [ -n "$pkg_name" ]; then
+                local slug="${pkg_name%-bin}"
+                detected_apps["$slug"]=1
+            else
+                local fname="${pkg_file##*/}"
+                local base="${fname%%-[0-9]*}"
+                local slug="${base%-bin}"
+                [ -n "$slug" ] && detected_apps["$slug"]=1
+            fi
+        done
+    fi
+
+    if command -v pacman &>/dev/null; then
+        local installed_bins
+        installed_bins="$(pacman -Qq 2>/dev/null | grep -- '-bin$' || true)"
+        if [ -n "$installed_bins" ]; then
+            local current_pkg=""
+            local managed_re="Managed by pkgapps|\[${target_repo}\]"
+            local pretty_re='^([^(]+) \(Managed'
+            while IFS= read -r line || [ -n "$line" ]; do
+                if [[ "$line" =~ ^Name[[:space:]]*:[[:space:]]*(.*) ]]; then
+                    current_pkg="${BASH_REMATCH[1]}"
+                elif [[ "$line" =~ ^Description[[:space:]]*:[[:space:]]*(.*) ]]; then
+                    local current_desc="${BASH_REMATCH[1]}"
+                    if [[ "$current_desc" =~ $managed_re ]]; then
+                        local slug="${current_pkg%-bin}"
+                        detected_apps["$slug"]=1
+                        if [[ "$current_desc" =~ $pretty_re ]]; then
+                            local extracted_pretty="${BASH_REMATCH[1]}"
+                            extracted_pretty="$(echo "$extracted_pretty" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                            if [ -z "${detected_pretties[$slug]:-}" ] && [ -n "$extracted_pretty" ]; then
+                                detected_pretties["$slug"]="$extracted_pretty"
+                            fi
+                        fi
+                    fi
+                fi
+            done < <(pacman -Qi $installed_bins 2>/dev/null || true)
+        fi
+    fi
+
+    local app_slug
+    for app_slug in "${!detected_apps[@]}"; do
+        [ -z "$app_slug" ] && continue
+        local app_pretty="${detected_pretties[$app_slug]:-$app_slug}"
+        local orig_slug="${detected_origs[$app_slug]:-}"
+
+        if pacman -Qi "${app_slug}-bin" &>/dev/null; then
+            echo -e "  ${C_YELLOW:-}::${C_RESET:-} Removing installed package ${C_BOLD:-}${app_slug}-bin${C_RESET:-}..."
+            sudo pacman -Rns --noconfirm "${app_slug}-bin" < /dev/null 2>/dev/null || true
+        fi
+
+        sudo rm -rf "${target_app_base}/${app_slug}" < /dev/null 2>/dev/null || true
+        sudo rm -f "/usr/bin/${app_slug}" < /dev/null 2>/dev/null || true
+        sudo rm -f "/usr/share/applications/${app_slug}.desktop" < /dev/null 2>/dev/null || true
+        rm -f "$HOME/.local/share/applications/${app_slug}.desktop" 2>/dev/null || true
+        sudo rm -f /usr/share/pixmaps/${app_slug}.* < /dev/null 2>/dev/null || true
+        sudo find /usr/share/icons/hicolor -path "*/apps/${app_slug}.*" -delete 2>/dev/null || true
+
+        if [ "$purge_data" = "1" ] || [ "$purge_data" = "wipe" ]; then
+            purge_app_user_data "$app_slug" "$app_pretty" "$orig_slug"
         fi
     done
 
+    # Refresh desktop database and icon cache
+    sudo update-desktop-database /usr/share/applications < /dev/null 2>/dev/null || true
+    if [ -d "$HOME/.local/share/applications" ]; then
+        update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+    fi
+    sudo gtk-update-icon-cache -f -t /usr/share/icons/hicolor < /dev/null 2>/dev/null || true
+
     # Remove repo block from /etc/pacman.conf
     if grep -q "\[${target_repo}\]" /etc/pacman.conf 2>/dev/null; then
-        sudo sed -i "/^\[${target_repo}\]/,+2d" /etc/pacman.conf < /dev/tty 2>/dev/null || true
+        sudo sed -i "/^\[${target_repo}\]/,+2d" /etc/pacman.conf < /dev/null 2>/dev/null || true
     fi
 
-    sudo rm -f "/etc/pacman.d/hooks/${target_repo}-cleanup.hook" < /dev/tty 2>/dev/null || true
-    sudo rm -rf "$target_dir" < /dev/tty 2>/dev/null || true
+    sudo rm -f "/etc/pacman.d/hooks/${target_repo}-cleanup.hook" < /dev/null 2>/dev/null || true
+    sudo rm -rf "$target_dir" < /dev/null 2>/dev/null || true
     rm -rf "$HOME/.config/${target_repo}" 2>/dev/null || true
 }
 
@@ -750,10 +945,10 @@ perform_full_uninstall() {
         sed -i '/pkgapps/d' "$HOME/.local/share/omarchy/bin/omarchy-update" 2>/dev/null || true
     fi
 
-    sudo rm -f "/usr/share/zsh/site-functions/_pkgapps" "/usr/share/bash-completion/completions/pkgapps" < /dev/tty 2>/dev/null || true
-    sudo rm -f "$OLD_BIN_PATH" "$DEFAULT_BIN_PATH" "/usr/bin/pkgapps" "$HOME/.local/bin/pkgapps" "$GLOBAL_CONF" < /dev/tty 2>/dev/null || true
+    sudo rm -f "/usr/share/zsh/site-functions/_pkgapps" "/usr/share/bash-completion/completions/pkgapps" < /dev/null 2>/dev/null || true
+    sudo rm -f "$OLD_BIN_PATH" "$DEFAULT_BIN_PATH" "/usr/bin/pkgapps" "$HOME/.local/bin/pkgapps" "$GLOBAL_CONF" < /dev/null 2>/dev/null || true
     rm -f "$HOME/.local/bin/pkgapps" 2>/dev/null || true
-    sudo pacman -Sy < /dev/tty >/dev/null 2>&1 || true
+    sudo pacman -Sy < /dev/null >/dev/null 2>&1 || true
 
     echo ""
     echo -e "  ${C_GREEN}✓ pkgapps, all tracked applications, repositories, and shell hooks have been completely removed.${C_RESET}"
@@ -934,8 +1129,14 @@ else
 
                 if [ "$SELECTED_INDEX" -eq 0 ]; then
                     prompt_factory_reset_choice "Data Retention Mode for Clean Reinstall"
-                    local reset_choice=$?
-                    [ "$reset_choice" -eq 2 ] && continue
+                    if [ "$PURGE_MODE" = "cancel" ]; then
+                        continue
+                    fi
+
+                    local reset_choice=0
+                    if [ "$PURGE_MODE" = "wipe" ]; then
+                        reset_choice=1
+                    fi
 
                     remove_all_installed_apps_and_repo "$OLD_REPO_NAME" "$OLD_REPO_DIR" "$OLD_APP_BASE_DIR" "$reset_choice"
                     REPO_NAME="$DEFAULT_REPO_NAME"
@@ -973,8 +1174,14 @@ else
 
                 if [ "$SELECTED_INDEX" -eq 0 ]; then
                     prompt_factory_reset_choice "Data Retention Mode for Uninstallation"
-                    local del_reset_choice=$?
-                    [ "$del_reset_choice" -eq 2 ] && continue
+                    if [ "$PURGE_MODE" = "cancel" ]; then
+                        continue
+                    fi
+
+                    local del_reset_choice=0
+                    if [ "$PURGE_MODE" = "wipe" ]; then
+                        del_reset_choice=1
+                    fi
 
                     perform_full_uninstall "$del_reset_choice"
                     exit 0

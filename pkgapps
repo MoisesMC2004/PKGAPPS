@@ -176,22 +176,60 @@ prompt_buttons() {
             case "${key,,}" in
                 l) cur=$(( (cur + 1) % count )) ;;
                 h) cur=$(( (cur - 1 + count) % count )) ;;
-                i|y) SELECTED_INDEX=0; break ;;
                 k)
-                    if [[ "${btns[0],,}" == k* ]]; then
+                    if [[ "${btns[0],,}" == *keep* ]] || [[ "${btns[0],,}" == k* ]]; then
                         SELECTED_INDEX=0
                         break
                     fi
                     ;;
                 w)
-                    if [ "$count" -ge 2 ] && [[ "${btns[1],,}" == w* ]]; then
+                    if [ "$count" -ge 2 ] && { [[ "${btns[1],,}" == *wipe* ]] || [[ "${btns[1],,}" == w* ]]; }; then
+                        SELECTED_INDEX=1
+                        break
+                    elif [[ "${btns[0],,}" == *erase* ]] || [[ "${btns[0],,}" == *wipe* ]] || [[ "${btns[0],,}" == *yes* ]]; then
+                        SELECTED_INDEX=0
+                        break
+                    fi
+                    ;;
+                i|y)
+                    SELECTED_INDEX=0
+                    break
+                    ;;
+                n)
+                    if [ "$count" -ge 2 ]; then
                         SELECTED_INDEX=1
                         break
                     fi
                     ;;
-                n|1) [ "$count" -ge 2 ] && { SELECTED_INDEX=1; break; } ;;
-                c|2) [ "$count" -ge 3 ] && { SELECTED_INDEX=2; break; } ;;
-                q) SELECTED_INDEX=$((count - 1)); break ;;
+                b)
+                    if [ "$count" -ge 3 ] && [[ "${btns[2],,}" == b* ]]; then
+                        SELECTED_INDEX=2
+                        break
+                    elif [ "$count" -ge 2 ] && [[ "${btns[1],,}" == *back* ]]; then
+                        SELECTED_INDEX=1
+                        break
+                    fi
+                    ;;
+                c)
+                    if [ "$count" -ge 3 ]; then
+                        SELECTED_INDEX=2
+                        break
+                    elif [ "$count" -ge 2 ] && [[ "${btns[1],,}" == *cancel* ]]; then
+                        SELECTED_INDEX=1
+                        break
+                    fi
+                    ;;
+                1|2|3|4)
+                    local num_idx=$((key - 1))
+                    if [ "$num_idx" -lt "$count" ]; then
+                        SELECTED_INDEX="$num_idx"
+                        break
+                    fi
+                    ;;
+                q)
+                    SELECTED_INDEX=$((count - 1))
+                    break
+                    ;;
             esac
         fi
     done
@@ -510,38 +548,125 @@ is_valid_image() {
 purge_app_user_data() {
     local app_slug="$1"
     local app_pretty="${2:-}"
+    local orig_slug="${3:-}"
     [ -z "$app_slug" ] && return 0
 
     case "${app_slug,,}" in
-        ""|"."|".."|"root"|"home"|"config"|"cache"|"local"|"share"|"state"|"bin"|"lib"|"etc")
+        ""|"."|".."|"root"|"home"|"config"|"cache"|"local"|"share"|"state"|"bin"|"lib"|"etc"|"usr"|"var"|"tmp"|"opt"|"gemini"|".gemini"|"omarchy"|"hypr"|"hyprland")
             return 0
             ;;
     esac
 
-    local -a candidate_dirs=(
-        "${XDG_CONFIG_HOME:-$HOME/.config}/${app_slug}"
-        "${XDG_CACHE_HOME:-$HOME/.cache}/${app_slug}"
-        "${XDG_DATA_HOME:-$HOME/.local/share}/${app_slug}"
-        "${XDG_STATE_HOME:-$HOME/.local/state}/${app_slug}"
-    )
+    local -A seen_patterns=()
+    local -a patterns=()
 
-    if [ -n "$app_pretty" ] && [ "${app_pretty}" != "${app_slug}" ]; then
-        local stripped_pretty="${app_pretty// /}"
-        candidate_dirs+=(
-            "${XDG_CONFIG_HOME:-$HOME/.config}/${stripped_pretty}"
-            "${XDG_CACHE_HOME:-$HOME/.cache}/${stripped_pretty}"
-            "${XDG_DATA_HOME:-$HOME/.local/share}/${stripped_pretty}"
-            "${XDG_STATE_HOME:-$HOME/.local/state}/${stripped_pretty}"
-        )
+    add_pattern() {
+        local p="$1"
+        [ -z "$p" ] && return 0
+        local p_lower="${p,,}"
+        case "$p_lower" in
+            ""|"."|".."|"root"|"home"|"config"|"cache"|"local"|"share"|"state"|"bin"|"lib"|"etc"|"usr"|"var"|"tmp"|"opt"|"gemini"|".gemini"|"omarchy"|"hypr"|"hyprland")
+                return 0
+                ;;
+        esac
+        [ ${#p} -lt 2 ] && return 0
+        if [ -z "${seen_patterns[$p]:-}" ]; then
+            seen_patterns["$p"]=1
+            patterns+=("$p")
+        fi
+    }
+
+    add_pattern "$app_slug"
+    [ -n "$orig_slug" ] && add_pattern "$orig_slug"
+
+    if [ -n "$app_pretty" ]; then
+        add_pattern "$app_pretty"
+        add_pattern "${app_pretty// /}"
+        add_pattern "${app_pretty// /-}"
+        add_pattern "${app_pretty// /_}"
     fi
 
-    local dir
-    for dir in "${candidate_dirs[@]}"; do
-        if [[ "$dir" =~ ^${HOME}/(\.config|\.cache|\.local/share|\.local/state)/.+ ]] && [ -d "$dir" ]; then
-            echo -e "  ${C_YELLOW}::${C_RESET} Purging user data: ${C_DIM}${dir}${C_RESET}"
-            rm -rf "$dir"
+    if [[ "$app_slug" =~ - ]]; then
+        add_pattern "${app_slug//-/ }"
+        add_pattern "${app_slug//-/_}"
+    fi
+
+    local base_word=""
+    if [[ "$app_slug" =~ ^([a-zA-Z0-9_-]+)-(desktop|bin|app|gui|client|electron)$ ]]; then
+        base_word="${BASH_REMATCH[1]}"
+        if [ ${#base_word} -ge 3 ]; then
+            case "${base_word,,}" in
+                ""|"."|".."|"root"|"home"|"config"|"cache"|"local"|"share"|"state"|"bin"|"lib"|"etc"|"usr"|"var"|"tmp"|"opt"|"gemini"|".gemini"|"omarchy"|"hypr"|"hyprland")
+                    ;;
+                *)
+                    add_pattern "$base_word"
+                    ;;
+            esac
         fi
+    fi
+
+    [ ${#patterns[@]} -eq 0 ] && return 0
+
+    local -a find_args=()
+    local idx=0
+    for p in "${patterns[@]}"; do
+        if [ $idx -gt 0 ]; then
+            find_args+=("-o")
+        fi
+        find_args+=("-iname" "$p")
+        idx=$((idx + 1))
     done
+
+    local -a base_xdg_dirs=(
+        "${XDG_CONFIG_HOME:-$HOME/.config}"
+        "${XDG_CACHE_HOME:-$HOME/.cache}"
+        "${XDG_DATA_HOME:-$HOME/.local/share}"
+        "${XDG_STATE_HOME:-$HOME/.local/state}"
+    )
+
+    local base_dir
+    for base_dir in "${base_xdg_dirs[@]}"; do
+        [ -d "$base_dir" ] || continue
+        while IFS= read -r matched_path; do
+            [ -z "$matched_path" ] && continue
+            [ -d "$matched_path" ] || continue
+            local parent_dir="${matched_path%/*}"
+            [ "$parent_dir" = "$base_dir" ] || continue
+            local bname="${matched_path##*/}"
+            case "${bname,,}" in
+                ""|"."|".."|"root"|"home"|"config"|"cache"|"local"|"share"|"state"|"bin"|"lib"|"etc"|"usr"|"var"|"tmp"|"opt"|"gemini"|".gemini"|"omarchy"|"hypr"|"hyprland"|"applications"|"systemd"|"menus"|"mime"|"themes"|"icons"|"fonts")
+                    continue
+                    ;;
+            esac
+            echo -e "  ${C_YELLOW:-}::${C_RESET:-} Purging user data: ${C_DIM:-}${matched_path}${C_RESET:-}"
+            rm -rf "$matched_path"
+        done < <(find "$base_dir" -maxdepth 1 -mindepth 1 -type d \( "${find_args[@]}" \) 2>/dev/null || true)
+    done
+
+    local -a home_dot_args=()
+    idx=0
+    for p in "${patterns[@]}"; do
+        if [ $idx -gt 0 ]; then
+            home_dot_args+=("-o")
+        fi
+        home_dot_args+=("-iname" ".$p")
+        idx=$((idx + 1))
+    done
+
+    while IFS= read -r matched_path; do
+        [ -z "$matched_path" ] && continue
+        [ -d "$matched_path" ] || continue
+        local parent_dir="${matched_path%/*}"
+        [ "$parent_dir" = "$HOME" ] || continue
+        local bname="${matched_path##*/}"
+        case "${bname,,}" in
+            ""|"."|".."|".config"|".cache"|".local"|".gemini"|".ssh"|".gnupg"|".pki"|".npm"|".nv"|".agents"|".codex"|".claude"|".hermes"|".pi"|".bash*"|".git*"|".profile"|".bashrc")
+                continue
+                ;;
+        esac
+        echo -e "  ${C_YELLOW:-}::${C_RESET:-} Purging user data: ${C_DIM:-}${matched_path}${C_RESET:-}"
+        rm -rf "$matched_path"
+    done < <(find "$HOME" -maxdepth 1 -mindepth 1 -type d \( "${home_dot_args[@]}" \) 2>/dev/null || true)
 }
 
 compare_versions() {
@@ -2008,24 +2133,29 @@ case "${1:-}" in
         render_header "Removing ${APP}-bin from system and [${REPO_NAME}]..."
 
         local APP_PRETTY="$APP"
+        local ORIG_SLUG=""
         if [ -f "$SOURCES_FILE" ]; then
             local line
             line=$(grep -i "^${APP}|" "$SOURCES_FILE" 2>/dev/null || true)
             if [ -n "$line" ]; then
-                local p_field
+                local o_field p_field
+                o_field=$(printf '%s\n' "$line" | cut -d'|' -f3)
                 p_field=$(printf '%s\n' "$line" | cut -d'|' -f4)
+                [ -n "$o_field" ] && ORIG_SLUG="$o_field"
                 [ -n "$p_field" ] && APP_PRETTY="$p_field"
             fi
         fi
 
-        echo -e "  ${C_SUBTEXT}How would you like to handle user data for ${APP_PRETTY}?${C_RESET}"
-        echo -e "    ${C_CYAN}[1] Keep User Data & Sessions${C_RESET}     ${C_DIM}(Removes package/binaries; preserves ~/.config, caches & sessions)${C_RESET}"
-        echo -e "    ${C_RED}[2] Wipe All Data — Factory Reset${C_RESET} ${C_DIM}(Permanently erases all configs, active sessions, and caches)${C_RESET}"
+        echo -e "  ${C_SUBTEXT}How would you like to handle application user data for ${APP_PRETTY}?${C_RESET}"
+        echo -e "    ${C_CYAN}[1] Uninstall App Only (Keep User Data)${C_RESET}"
+        echo -e "        ${C_DIM}(Removes packages/binaries; keeps ~/.config, caches & sessions)${C_RESET}"
+        echo -e "    ${C_RED}[2] Uninstall App + Wipe All Data (Factory Reset)${C_RESET}"
+        echo -e "        ${C_DIM}(Permanently erases all configs, active sessions, and caches)${C_RESET}"
         echo ""
         prompt_buttons \
             "Choose an uninstallation data mode:" \
             "k Keep Data • w Wipe All (Factory Reset) • c Cancel" \
-            "Keep User Data & Sessions" "Wipe All Data — Factory Reset" "Cancel / Abort"
+            "Uninstall App Only (Keep User Data)" "Uninstall App + Wipe All Data (Factory Reset)" "Cancel / Go Back"
 
         local do_purge=0
         case "$SELECTED_INDEX" in
@@ -2034,18 +2164,18 @@ case "${1:-}" in
                 ;;
             1)
                 render_header "WARNING: Factory Reset Confirmation for ${APP_PRETTY}"
-                echo -e "  ${C_RED}${C_BOLD}WARNING: ALL USER DATA WILL BE PERMANENTLY ERASED!${C_RESET}"
+                echo -e "  ${C_RED}${C_BOLD}WARNING: ALL APPLICATION USER DATA WILL BE PERMANENTLY ERASED!${C_RESET}"
                 echo -e "  ${C_TEXT}This will erase all login sessions, settings, caches, and states for ${APP_PRETTY} across:${C_RESET}"
-                echo -e "  ${C_RED}• ~/.config/${APP}${C_RESET}"
-                echo -e "  ${C_RED}• ~/.cache/${APP}${C_RESET}"
-                echo -e "  ${C_RED}• ~/.local/share/${APP}${C_RESET}"
-                echo -e "  ${C_RED}• ~/.local/state/${APP}${C_RESET}"
+                echo -e "  ${C_RED}• ~/.config/[app]${C_RESET}"
+                echo -e "  ${C_RED}• ~/.cache/[app]${C_RESET}"
+                echo -e "  ${C_RED}• ~/.local/share/[app]${C_RESET}"
+                echo -e "  ${C_RED}• ~/.local/state/[app]${C_RESET}"
                 echo -e "  ${C_DIM}The system will be left as if ${APP_PRETTY} had NEVER been installed.${C_RESET}"
                 echo ""
                 prompt_buttons \
                     "Are you absolutely sure you want to permanently wipe all user data?" \
-                    "w Yes, erase all • n No, cancel" \
-                    "Yes, Erase Everything" "No, Cancel"
+                    "w Yes, erase all • n No, go back" \
+                    "Yes, Erase Everything" "No, Go Back"
                 if [ "$SELECTED_INDEX" -eq 0 ]; then
                     do_purge=1
                 else
@@ -2053,22 +2183,41 @@ case "${1:-}" in
                     exit 0
                 fi
                 ;;
-            2)
+            2|*)
                 echo -e "  ${C_YELLOW}==> Removal cancelled by user.${C_RESET}"
                 exit 0
                 ;;
         esac
 
         if pacman -Qi "${APP}-bin" &>/dev/null; then
-            sudo pacman -Rns "${APP}-bin"
-        else
-            echo "${APP}-bin" | "$SCRIPT_PATH" --hook-remove
+            echo -e "  ${C_YELLOW:-}::${C_RESET:-} Removing installed package ${C_BOLD:-}${APP}-bin${C_RESET:-}..."
+            sudo pacman -Rns --noconfirm "${APP}-bin" < /dev/null 2>/dev/null || true
         fi
+
+        # Ensure repository database, package file, and sources.conf are cleaned
+        sed -i "/^${APP}|/d" "$SOURCES_FILE" 2>/dev/null || true
+        repo-remove "$REPO_DB" "${APP}-bin" >/dev/null 2>&1 || true
+        rm -f "$REPO_DIR/${APP}-bin-"*.pkg.tar.zst* 2>/dev/null || true
+
+        # Clean filesystem artifacts
         sudo rm -rf "${APP_BASE_DIR}/${APP}" 2>/dev/null || true
+        sudo rm -f "/usr/bin/${APP}" 2>/dev/null || true
+        sudo rm -f "/usr/share/applications/${APP}.desktop" 2>/dev/null || true
+        rm -f "$HOME/.local/share/applications/${APP}.desktop" 2>/dev/null || true
+        sudo rm -f /usr/share/pixmaps/${APP}.* 2>/dev/null || true
+        sudo find /usr/share/icons/hicolor -path "*/apps/${APP}.*" -delete 2>/dev/null || true
+
+        # Refresh desktop database and icon cache
+        sudo update-desktop-database /usr/share/applications 2>/dev/null || true
+        if [ -d "$HOME/.local/share/applications" ]; then
+            update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+        fi
+        sudo gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
 
         if [ "$do_purge" -eq 1 ]; then
-            purge_app_user_data "$APP" "$APP_PRETTY"
+            purge_app_user_data "$APP" "$APP_PRETTY" "$ORIG_SLUG"
         fi
+        echo -e "  ${C_GREEN}==> Successfully removed ${APP}-bin from system.${C_RESET}"
         ;;
     *)
         if [ $# -lt 1 ]; then
